@@ -124,11 +124,14 @@ test('the streamed body arrives byte-for-byte', async (t) => {
 });
 
 test('a GET with no body goes to Anthropic', async (t) => {
+  // /v1/models itself is answered locally now, so this uses retrieve-by-id -
+  // which doubles as the guard that only the list endpoint was intercepted.
   const { provider, anthropic, gatewayPort } = await harness(t);
-  await fetch(`http://127.0.0.1:${gatewayPort}/v1/models`);
+  await fetch(`http://127.0.0.1:${gatewayPort}/v1/models/claude-opus-4-5-20251101`);
   assert.equal(provider.received.length, 0);
   assert.equal(anthropic.received.length, 1);
   assert.equal(anthropic.received[0].method, 'GET');
+  assert.equal(anthropic.received[0].url, '/v1/models/claude-opus-4-5-20251101');
 });
 
 test('an unreachable upstream returns 502 in Anthropic error shape', async (t) => {
@@ -216,4 +219,151 @@ test('a client that hangs up mid-stream aborts the upstream request', async (t) 
 
   await waitFor(() => upstreamAborted);
   assert.equal(upstreamAborted, true);
+});
+
+// ------------------------------------------------------------ model discovery
+//
+// GET /v1/models is the one path the gateway answers itself. Every case here
+// MUST pass an anthropicBaseUrl pointing at a stub: without one the best-effort
+// merge fires at the real api.anthropic.com from whatever machine runs the suite.
+
+/** A stub that answers /v1/models however the test says, and records the call. */
+function stubModels(respond) {
+  const received = [];
+  const server = http.createServer((req, res) => {
+    received.push({ method: req.method, url: req.url, headers: { ...req.headers } });
+    respond(req, res);
+  });
+  return { server, received };
+}
+
+/** The gateway, a provider stub, and an Anthropic stub with a scripted /v1/models. */
+async function discoveryHarness(t, respond, { modelsMergeTimeoutMs } = {}) {
+  const provider = stubUpstream(SSE);
+  const anthropic = stubModels(respond);
+  const providerPort = await listen(provider.server);
+  const anthropicPort = await listen(anthropic.server);
+
+  const cfg = normalize(
+    {
+      providers: { openrouter: { base_url: `http://127.0.0.1:${providerPort}`, api_key: 'sk-or-v1-secret' } },
+      models: { minimax: { model: 'minimax-m3:free', provider: 'openrouter' } },
+    },
+    { env: {} },
+  );
+
+  const gateway = createServer(cfg, {
+    anthropicBaseUrl: `http://127.0.0.1:${anthropicPort}`,
+    modelsMergeTimeoutMs,
+  });
+  const gatewayPort = await listen(gateway);
+
+  t.after(async () => {
+    await close(gateway);
+    await close(provider.server);
+    await close(anthropic.server);
+  });
+
+  return { provider, anthropic, gatewayPort };
+}
+
+const jsonModels = (body) => (req, res) => {
+  res.writeHead(200, { 'content-type': 'application/json' });
+  res.end(JSON.stringify(body));
+};
+
+const UPSTREAM_LIST = {
+  data: [{ id: 'claude-opus-4-5', display_name: 'Claude Opus 4.5', created_at: '2025-11-01T00:00:00Z' }],
+  has_more: false,
+};
+
+async function getModels(port, headers = {}) {
+  const res = await fetch(`http://127.0.0.1:${port}/v1/models?limit=1000`, { headers });
+  return { status: res.status, headers: res.headers, body: JSON.parse(await res.text()) };
+}
+
+test('GET /v1/models merges the configured aliases with Anthropic', async (t) => {
+  const { provider, anthropic, gatewayPort } = await discoveryHarness(t, jsonModels(UPSTREAM_LIST));
+
+  const res = await getModels(gatewayPort);
+
+  assert.equal(res.status, 200);
+  assert.equal(res.headers.get('content-type'), 'application/json');
+  assert.deepEqual(
+    res.body.data.map((m) => m.id),
+    ['anthropic/minimax', 'claude-opus-4-5'],
+  );
+  assert.equal(res.body.data[0].display_name, 'minimax (openrouter)');
+  assert.equal(res.body.has_more, false);
+
+  assert.equal(provider.received.length, 0, 'discovery must never touch a provider');
+  assert.equal(anthropic.received[0].url, '/v1/models?limit=1000', 'the query is forwarded');
+});
+
+test('the caller credential reaches the merge', async (t) => {
+  const { anthropic, gatewayPort } = await discoveryHarness(t, jsonModels(UPSTREAM_LIST));
+
+  await getModels(gatewayPort, {
+    'x-api-key': 'sk-ant-user',
+    'anthropic-beta': 'oauth-2025-04-20,fine-grained-tool-streaming-2025-05-14',
+  });
+
+  const seen = anthropic.received[0].headers;
+  assert.equal(seen['x-api-key'], 'sk-ant-user');
+  // Without this beta value an OAuth Bearer is refused, so it has to survive.
+  assert.match(seen['anthropic-beta'], /oauth-2025-04-20/);
+});
+
+test('an upstream that fails still serves the local aliases', async (t) => {
+  const cases = [
+    ['500', (req, res) => { res.writeHead(500); res.end('boom'); }],
+    ['HTML', (req, res) => { res.writeHead(200, { 'content-type': 'text/html' }); res.end('<h1>hi</h1>'); }],
+    ['a redirect', (req, res) => { res.writeHead(302, { location: 'https://elsewhere/v1/models' }); res.end(); }],
+    ['no data array', jsonModels({ ok: true })],
+  ];
+
+  for (const [label, respond] of cases) {
+    const { gatewayPort } = await discoveryHarness(t, respond);
+    const res = await getModels(gatewayPort);
+    assert.equal(res.status, 200, label);
+    assert.deepEqual(res.body.data.map((m) => m.id), ['anthropic/minimax'], label);
+  }
+});
+
+test('an upstream that hangs is abandoned well inside Claude Code budget', async (t) => {
+  // Claude Code gives discovery 3s total and treats an overrun as no list at all.
+  const { gatewayPort } = await discoveryHarness(t, () => {}, { modelsMergeTimeoutMs: 100 });
+
+  const started = Date.now();
+  const res = await getModels(gatewayPort);
+
+  assert.equal(res.status, 200);
+  assert.deepEqual(res.body.data.map((m) => m.id), ['anthropic/minimax']);
+  assert.ok(Date.now() - started < 3000, 'must not eat the whole discovery budget');
+});
+
+test('HEAD /v1/models is a bodyless 200 with an honest content-length', async (t) => {
+  const { gatewayPort } = await discoveryHarness(t, jsonModels(UPSTREAM_LIST));
+
+  const get = await fetch(`http://127.0.0.1:${gatewayPort}/v1/models`);
+  const length = (await get.text()).length;
+
+  const head = await fetch(`http://127.0.0.1:${gatewayPort}/v1/models`, { method: 'HEAD' });
+  assert.equal(head.status, 200);
+  assert.equal((await head.text()).length, 0);
+  assert.equal(head.headers.get('content-length'), String(length));
+});
+
+test('a discovered id routes back to its provider', async (t) => {
+  // The only test that proves what we advertise and what we route agree.
+  const { provider, gatewayPort } = await discoveryHarness(t, jsonModels(UPSTREAM_LIST));
+
+  const res = await getModels(gatewayPort);
+  const advertised = res.body.data[0].id;
+  assert.equal(advertised, 'anthropic/minimax');
+
+  await post(gatewayPort, { model: advertised, max_tokens: 10 });
+
+  assert.equal(provider.received.length, 1);
+  assert.equal(JSON.parse(provider.received[0].body).model, 'minimax-m3:free');
 });

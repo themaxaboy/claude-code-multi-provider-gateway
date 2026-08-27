@@ -2,13 +2,23 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { CONFIG_NAME, DEFAULT_SERVER, configPath } from '../config.js';
-import { applyBaseUrl, baseUrlFor, settingsPath } from '../claude-settings.js';
+import { applyEnv, baseUrlFor, settingsPath } from '../claude-settings.js';
 import { ensureIgnored } from '../gitignore.js';
 import { confirm } from '../prompt.js';
 import { cyan, dim, green, red, yellow } from '../log.js';
 
 /** Claude Code's per-user settings file; personal, never shared. */
 const SETTINGS_ENTRY = '.claude/settings.local.json';
+
+/**
+ * The env vars that make Claude Code use the gateway. The discovery flag is what
+ * puts the models: aliases in the /model picker; without it Claude Code never
+ * asks for the list. Values must be strings — Claude Code reads env as strings.
+ */
+const settingsEnv = (url) => ({
+  ANTHROPIC_BASE_URL: url,
+  CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY: '1',
+});
 
 const template = (port) => `version: 1
 
@@ -67,16 +77,19 @@ export async function init(flags = {}) {
   let wroteSettings = false;
 
   if (wantSettings) {
-    const result = applyBaseUrl({ global, url });
+    const result = applyEnv({ global, env: settingsEnv(url) });
+    const detail = dim(`(ANTHROPIC_BASE_URL=${url} + model discovery)`);
 
     switch (result.action) {
       case 'created':
-        console.log(`${green('created')} ${result.file} ${dim(`(ANTHROPIC_BASE_URL=${url})`)}`);
+        console.log(`${green('created')} ${result.file} ${detail}`);
         wroteSettings = true;
         break;
       case 'updated':
-        console.log(`${green('updated')} ${result.file} ${dim(`(ANTHROPIC_BASE_URL=${url})`)}`);
-        if (result.previous) console.log(dim(`        was ${result.previous}`));
+        console.log(`${green('updated')} ${result.file} ${detail}`);
+        if (result.previous.ANTHROPIC_BASE_URL) {
+          console.log(dim(`        was ${result.previous.ANTHROPIC_BASE_URL}`));
+        }
         wroteSettings = true;
         break;
       case 'unchanged':
@@ -120,11 +133,13 @@ export async function init(flags = {}) {
   } else {
     console.log(`  ${step}. Point Claude Code at it yourself:`);
     console.log(`     ${cyan(`export ANTHROPIC_BASE_URL=${url}`)}`);
-    console.log(dim(`     or add  "env": { "ANTHROPIC_BASE_URL": "${url}" }  to ${short(target)}`));
+    console.log(`     ${cyan('export CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1')}`);
+    console.log(dim(`     or add both under  "env"  in ${short(target)}`));
   }
 
   console.log('');
   console.log(dim('  Anthropic models need no entry — anything not in models: goes straight through.'));
+  console.log(dim('  Your models: aliases show up in /model once the gateway is running.'));
 
   return 0;
 }

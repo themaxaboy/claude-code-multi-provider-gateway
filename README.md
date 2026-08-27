@@ -61,8 +61,22 @@ ccmpg init
 ? Point Claude Code at the gateway for this project?  .claude/settings.local.json (Y/n)
 ```
 
-ตอบ `Y` จะได้ `./.claude/settings.local.json` ที่มี `ANTHROPIC_BASE_URL` ให้ (ข้ามคำถามด้วย `-y`
+ตอบ `Y` จะได้ `./.claude/settings.local.json` ที่มีสองค่านี้ให้ (ข้ามคำถามด้วย `-y`
 หรือปฏิเสธไปเลยด้วย `--no-settings`)
+
+```json
+{
+  "env": {
+    "ANTHROPIC_BASE_URL": "http://localhost:8787",
+    "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY": "1"
+  }
+}
+```
+
+ตัวหลังคือสวิตช์ที่ทำให้ Claude Code ถามรายการโมเดลจาก Gateway ตอนเปิด แล้วเอา alias ใน `models:`
+ไปแสดงใน `/model` ให้เลย (ดู [สลับโมเดลระหว่างใช้งาน](#5--สลับโมเดลระหว่างใช้งาน))
+ทุกคีย์เดิมในไฟล์ยังอยู่ครบ เพราะเขียนแบบ merge เสมอ — ใครเคยรัน `ccmpg init` ตั้งแต่ก่อนมีฟีเจอร์นี้
+รันซ้ำอีกครั้งได้เลย จะเติมให้เฉพาะบรรทัดที่ขาด
 
 จากนั้น `.gitignore` จะถูกสร้างหรือต่อท้ายให้อัตโนมัติ เพิ่ม `.ccmpg.yaml` และ
 `.claude/settings.local.json` เข้าไป — สองไฟล์นี้เป็นของเครื่องคุณคนเดียวและอาจมีคีย์จริงอยู่
@@ -98,7 +112,7 @@ ccmpg
 ```
 
 ```
-ccmpg 1.0.0  ·  listening on http://127.0.0.1:8787
+ccmpg 1.1.0  ·  listening on http://127.0.0.1:8787
   config     ./.ccmpg.yaml
   providers  openrouter
   models     minimax
@@ -122,6 +136,26 @@ claude
 /model minimax      ← alias จาก .ccmpg.yaml
 /model sonnet       ← กลับไปใช้ Anthropic
 ```
+
+พิมพ์ `/model` เปล่า ๆ จะเห็น alias ของคุณอยู่ในรายการ ติดป้าย **From gateway** พร้อมชื่อ provider กำกับ:
+
+```
+minimax (openrouter)     From gateway
+glm-4.6 (z_ai)           From gateway
+```
+
+> **ทำไม alias ถึงกลายเป็น `anthropic/minimax` ใน `/model`**
+>
+> Claude Code จะทิ้งรายการที่ชื่อไม่มีคำว่า `claude` หรือ `anthropic` อยู่ในนั้น — ชื่ออย่าง `minimax`
+> เปล่า ๆ จะถูกกรองทิ้งก่อนถึง picker เสมอ Gateway เลยประกาศ alias พวกนี้เป็น `anthropic/<alias>`
+> ให้ผ่านตัวกรอง แล้วถอด prefix คืนตอน route
+>
+> **ใช้ได้ทั้งสองแบบ** — `/model minimax` และ `/model anthropic/minimax` วิ่งไปที่เดียวกัน
+> เหมือนกันหมดทั้งใน `--model`, `"model"` ใน `.claude/settings.json` และ frontmatter ของ subagent
+> ส่วน alias ที่มีคำว่า `claude`/`anthropic` อยู่แล้ว (เช่น `claude-cheap`) ประกาศตามชื่อเดิม ไม่มี prefix
+
+แก้ `.ccmpg.yaml` แล้วต้อง `ccmpg restart` — Gateway อ่านคอนฟิกตอนเปิดครั้งเดียว และ Claude Code
+ยังแคชรายการที่ได้มาไว้ที่ `~/.claude/cache/gateway-models.json` อีกชั้น
 
 ---
 
@@ -176,6 +210,8 @@ model: minimax
 
 main agent ยังใช้ Opus ผ่าน Subscription ตามปกติ ส่วน `researcher` วิ่งผ่าน OpenRouter — ใน session เดียวกัน
 
+ใส่ `model: anthropic/minimax` ก็ได้ผลเหมือนกัน — เผื่อ copy ชื่อมาจาก `/model` โดยตรง
+
 ---
 
 ## คำสั่ง
@@ -189,7 +225,7 @@ main agent ยังใช้ Opus ผ่าน Subscription ตามปกต�
 | `ccmpg stop` · `restart` · `status` | ปิด · เปิดใหม่พร้อมโหลดคอนฟิก · ดูสถานะ |
 | `ccmpg logs -f` | ตามดู log ของตัวที่รันเบื้องหลัง |
 | `ccmpg startup` | ให้เปิดเองตอนบูต — launchd / systemd user unit / Startup folder ตาม OS (ยกเลิกด้วย `unstartup`) |
-| `ccmpg init` · `config` | สร้าง `.ccmpg.yaml` + settings ของ Claude Code · ดูคอนฟิกหลังรวมแล้ว |
+| `ccmpg init` · `config` | สร้าง `.ccmpg.yaml` + เขียน `ANTHROPIC_BASE_URL` และ `CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY` ลง settings ของ Claude Code · ดูคอนฟิกหลังรวมแล้ว |
 | `ccmpg provider add` · `rm` · `ls` | จัดการ provider |
 | `ccmpg model add` · `rm` · `ls` | จัดการ model alias |
 
@@ -270,6 +306,9 @@ Run npm i -g ccmpg to update
 | `400 model not found` | ตรวจว่า `models.<alias>.model` ตรงกับชื่อจริงฝั่ง provider |
 | แก้ `.ccmpg.yaml` แล้วไม่มีผล | `ccmpg restart` |
 | `/model x` ยังวิ่งไป Anthropic | `ccmpg status` ดูว่าโหลดคอนฟิกไฟล์ไหน |
+| `/model` ไม่ขึ้น alias เลย | ตรวจว่า `CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1` อยู่ใน settings จริง และไม่ได้ตั้ง `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` |
+| เพิ่ม alias ใหม่แล้วไม่ขึ้นใน `/model` | `ccmpg restart` แล้วลบ `~/.claude/cache/gateway-models.json` |
+| ใน `/model` ไม่มีโมเดล Anthropic ฝั่ง gateway | ปกติ — ตอนขอรายการไม่มีคีย์ที่ใช้ได้ Gateway จะส่งเฉพาะ alias ของคุณ ไม่กระทบโมเดล Anthropic ที่ Claude Code มีอยู่แล้ว |
 
 ---
 
@@ -282,8 +321,9 @@ Run npm i -g ccmpg to update
 - ไม่แปลง body ระหว่างรูปแบบ (tool schema, image block ต้องเข้ากันได้อยู่แล้ว)
 
 สิ่งที่ **รองรับแล้ว** และเทสต์คุมไว้: ทุก endpoint ทุกเมธอด query string body ขนาดใหญ่
-สถานะ error พร้อม header `retry-after` / `anthropic-ratelimit-*` และ **WebSocket** (`Upgrade`)
-ซึ่งถูก tunnel เป็น raw socket ไม่ผ่าน `fetch`
+สถานะ error พร้อม header `retry-after` / `anthropic-ratelimit-*` **WebSocket** (`Upgrade`)
+ซึ่งถูก tunnel เป็น raw socket ไม่ผ่าน `fetch` และ **model discovery** (`GET /v1/models`)
+ที่เอา alias ไปโผล่ใน `/model` ให้
 
 ### `/remote-control` ใช้ไม่ได้ระหว่างเปิด Gateway
 
@@ -330,13 +370,14 @@ ccmpg/
 │   │   ├── startup.js      # ลงทะเบียนให้เปิดตอนบูต
 │   │   └── shared.js       # ตารางและการมาสก์คีย์
 │   ├── config.js           # โหลดและรวม global + project, แทนค่า ${ENV}, validate
-│   ├── claude-settings.js  # merge ANTHROPIC_BASE_URL ลง settings ของ Claude Code
+│   ├── claude-settings.js  # merge env vars ลง settings ของ Claude Code
 │   ├── gitignore.js        # ต่อท้าย .gitignore แบบไม่ซ้ำและไม่แตะกฎเดิม
 │   ├── update.js           # แจ้งเตือนเวอร์ชันใหม่จากแคช รีเฟรชเบื้องหลัง
 │   ├── router.js           # เลือก provider และเขียนทับ body.model — ฟังก์ชันบริสุทธิ์
+│   ├── models.js           # รายการโมเดลของ GET /v1/models — ฟังก์ชันบริสุทธิ์
 │   ├── headers.js          # กรอง hop-by-hop, ใส่ auth, ตัด oauth beta — ฟังก์ชันบริสุทธิ์
 │   ├── usage.js            # แกะ SSE เก็บ token usage แบบ streaming
-│   ├── server.js           # HTTP server + catch-all route
+│   ├── server.js           # HTTP server — catch-all route + /v1/models ที่ตอบเอง
 │   ├── daemon.js           # pid file และ registry ของ instance ที่รันอยู่
 │   ├── edit.js             # แก้ YAML แบบ atomic รักษาคอมเมนต์
 │   ├── prompt.js           # ถามทีละข้อ ปิดตัวเองเมื่อไม่ใช่ TTY

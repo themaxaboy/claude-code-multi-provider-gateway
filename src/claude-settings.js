@@ -1,4 +1,4 @@
-// Point Claude Code at the gateway by writing ANTHROPIC_BASE_URL into its settings.
+// Point Claude Code at the gateway by writing env vars into its settings.
 //
 // These files belong to Claude Code, not to us: they routinely hold permissions,
 // hooks and model choices. Every write merges into what is already there.
@@ -30,12 +30,14 @@ export function baseUrlFor({ host = '127.0.0.1', port = 8787 } = {}) {
 }
 
 /**
- * Merge ANTHROPIC_BASE_URL into the settings file, leaving every other key alone.
+ * Merge a set of env vars into the settings file, leaving every other key alone.
  *
+ * @param {{global?: boolean, cwd?: string, env: Record<string, string>}} options
  * @returns {{file: string, action: 'created'|'updated'|'unchanged'|'unreadable',
- *            previous?: string, error?: string}}
+ *            previous: Record<string, string|undefined>, changed: string[], error?: string}}
+ *          `previous` holds the old value of each key that changed
  */
-export function applyBaseUrl({ global = false, cwd = process.cwd(), url }) {
+export function applyEnv({ global = false, cwd = process.cwd(), env }) {
   const file = settingsPath({ global, cwd });
 
   let settings = {};
@@ -50,24 +52,31 @@ export function applyBaseUrl({ global = false, cwd = process.cwd(), url }) {
         settings = JSON.parse(raw);
       } catch (error) {
         // Never overwrite a file we cannot understand.
-        return { file, action: 'unreadable', error: error.message };
+        return { file, action: 'unreadable', error: error.message, previous: {}, changed: [] };
       }
       if (settings === null || typeof settings !== 'object' || Array.isArray(settings)) {
-        return { file, action: 'unreadable', error: 'the top level is not an object' };
+        return {
+          file,
+          action: 'unreadable',
+          error: 'the top level is not an object',
+          previous: {},
+          changed: [],
+        };
       }
     }
   }
 
-  const previous = settings.env?.ANTHROPIC_BASE_URL;
-  if (previous === url) return { file, action: 'unchanged', previous };
+  const changed = Object.keys(env).filter((key) => settings.env?.[key] !== env[key]);
+  const previous = Object.fromEntries(changed.map((key) => [key, settings.env?.[key]]));
+  if (!changed.length) return { file, action: 'unchanged', previous, changed };
 
-  // Assigning to .env keeps the key in its original position when it exists.
-  settings.env = { ...settings.env, ANTHROPIC_BASE_URL: url };
+  // Spreading into .env keeps each key in its original position when it exists.
+  settings.env = { ...settings.env, ...env };
 
   fs.mkdirSync(path.dirname(file), { recursive: true });
   const tmp = `${file}.${process.pid}.tmp`;
   fs.writeFileSync(tmp, `${JSON.stringify(settings, null, 2)}\n`);
   fs.renameSync(tmp, file);
 
-  return { file, action: existed ? 'updated' : 'created', previous };
+  return { file, action: existed ? 'updated' : 'created', previous, changed };
 }

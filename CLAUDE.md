@@ -51,6 +51,29 @@ goes to that provider with `body.model` rewritten to the provider's real model i
 it goes to `https://api.anthropic.com`. The Anthropic fallback is hardcoded and not
 configurable — that is what keeps Claude Code subscriptions working.
 
+### The one path we answer ourselves
+
+`GET`/`HEAD` on exactly `/v1/models` is served locally by `serveModels` in `src/server.js`;
+everything else, `/v1/models/{id}` included, is still proxied. Claude Code asks for that list at
+startup when the user sets `CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1`, and shows what comes back
+in the `/model` picker under "From gateway". `ccmpg init` writes that variable.
+
+**Claude Code keeps a discovered entry only when its `id` contains `claude` or `anthropic`,
+case-insensitively.** A bare alias like `minimax` is dropped before it reaches the picker, so
+`src/models.js` advertises such aliases as `anthropic/<alias>` and `src/router.js` resolves that
+spelling back. The two must agree on precedence, which is why both try the literal name first and
+only then strip the prefix — an alias someone really named `anthropic/x` owns that id. In the router
+the `[1m]` suffix comes off *before* the prefix, or `anthropic/minimax[1m]` misses.
+
+The Anthropic half of the list is best effort **by contract**: Claude Code gives discovery 3 seconds
+total, so the merge fetch is capped at `MODELS_MERGE_TIMEOUT_MS` (1.5s, injectable for tests) and
+every failure — timeout, non-200, redirect, non-JSON — degrades to serving the local aliases alone.
+It must never return an error. That fetch is structurally the Anthropic path: the target is pinned to
+`anthropicBaseUrl` and it calls `buildRequestHeaders(req.headers, null)`, which is what keeps
+`anthropic-beta: oauth-2025-04-20` on the caller's credential.
+
+`src/models.js` is pure; the fetch and the timer live in `server.js`.
+
 ### The two paths are asymmetric — this is the core invariant
 
 `src/headers.js` treats the two destinations differently, and conflating them is the easiest
@@ -88,10 +111,16 @@ write, so an edit that would produce an invalid file throws and leaves the file 
 
 ### Pure vs. I/O modules
 
-`router.js`, `headers.js`, and `config.js`'s `normalize`/`interpolate` are pure and carry most
-of the test coverage. `test/parity.test.js` is the safety net for the passthrough path: it issues
-each request twice — direct to a stub and through the gateway — and asserts the two are
-indistinguishable. Add a case there whenever you touch request or response handling. `server.js`, `daemon.js`, `edit.js`, `prompt.js` do I/O. Keep new logic
+`router.js`, `headers.js`, `models.js`, and `config.js`'s `normalize`/`interpolate` are pure and
+carry most of the test coverage. `test/parity.test.js` is the safety net for the passthrough path: it
+issues each request twice — direct to a stub and through the gateway — and asserts the two are
+indistinguishable. Add a case there whenever you touch request or response handling.
+
+`GET`/`HEAD /v1/models` is the one documented exception, and never add a parity case for it:
+`bothWays` reads `seen.at(-1)`, so on an intercepted path the gateway leg silently reuses the *direct*
+observation and `assertParity` passes while asserting nothing. Discovery is covered by
+`test/models.test.js` and the discovery section of `test/server.test.js` instead — every case there
+must pass an `anthropicBaseUrl` pointing at a stub, or the merge fires at the real API from CI. `server.js`, `daemon.js`, `edit.js`, `prompt.js` do I/O. Keep new logic
 on the pure side where you can.
 
 `createServer(cfg, { anthropicBaseUrl })` takes the fallback URL as a parameter purely so
@@ -149,10 +178,12 @@ and both steps can be declined — interactively, or with `--no-settings` / `--n
 
 ### Claude Code settings
 
-`src/claude-settings.js` writes `ANTHROPIC_BASE_URL` into `.claude/settings.local.json`
-(or `~/.claude/settings.json` with `-g`). These files belong to Claude Code and usually hold
-permissions and hooks, so every write **merges**, and malformed JSON is reported and left
-alone rather than overwritten.
+`src/claude-settings.js`'s `applyEnv` writes a *set* of env vars — today `ANTHROPIC_BASE_URL` and
+`CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY` — into `.claude/settings.local.json` (or
+`~/.claude/settings.json` with `-g`). These files belong to Claude Code and usually hold permissions
+and hooks, so every write **merges**, and malformed JSON is reported and left alone rather than
+overwritten. It reports `changed` and a per-key `previous`, so re-running `init` after a new variable
+is added tops up only what is missing.
 
 ## Conventions
 

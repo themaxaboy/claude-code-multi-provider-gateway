@@ -76,6 +76,10 @@ async function add(aliasArg, flags) {
 
   console.log(`${green('added')} model ${cyan(alias)} ${dim('->')} ${file}`);
   console.log(dim(`  use it with:  /model ${alias}`));
+  // The gateway reads the config once at startup, and Claude Code caches the
+  // model list it discovers on top of that — so a new alias is two restarts
+  // away from the picker unless you say so.
+  console.log(dim('  restart the gateway (ccmpg restart) for it to show up in the /model picker'));
   return 0;
 }
 

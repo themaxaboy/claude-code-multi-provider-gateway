@@ -4,6 +4,13 @@
 // Every case issues the SAME request twice - once direct to a stub standing in
 // for api.anthropic.com, once through ccmpg - and compares what the stub saw
 // and what the caller got back.
+//
+// GET and HEAD on /v1/models are the one documented exception: the gateway
+// answers those itself (model discovery - see test/models.test.js and the
+// discovery section of test/server.test.js). Do NOT add a parity case for that
+// path. bothWays reads seen.at(-1), so on an intercepted path the gateway leg
+// silently reuses the DIRECT observation and assertParity passes while testing
+// nothing at all. /v1/models/{id} is still a passthrough and is covered below.
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -156,16 +163,25 @@ test('POST /v1/messages - streaming SSE', async (t) => {
   assert.equal(pair.gateway.body.toString(), sse);
 });
 
-test('GET /v1/models and query strings survive', async (t) => {
+test('GET query strings survive', async (t) => {
   const h = await harness(t, (req, res) => {
     res.writeHead(200, { 'content-type': 'application/json' });
-    res.end(JSON.stringify({ data: [{ id: 'claude-opus-5' }], has_more: false }));
+    res.end(JSON.stringify({ limit: 20, has_more: false }));
   });
-  assertParity(await bothWays(h, '/v1/models'), 'models');
+  assertParity(await bothWays(h, '/v1/organizations/spend_limits'), 'spend_limits');
   assertParity(
-    await bothWays(h, '/v1/models?limit=20&after_id=claude-opus-5&beta=true'),
-    'models with query',
+    await bothWays(h, '/v1/organizations/spend_limits?limit=20&after_id=abc&beta=true'),
+    'spend_limits with query',
   );
+});
+
+test('GET /v1/models/{id} is still a passthrough', async (t) => {
+  // Only the list endpoint is served locally; retrieve-by-id is not ours.
+  const h = await harness(t, (req, res) => {
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ id: 'claude-opus-5', type: 'model' }));
+  });
+  assertParity(await bothWays(h, '/v1/models/claude-opus-5'), 'models retrieve');
 });
 
 test('the other endpoints Claude Code calls', async (t) => {
@@ -207,7 +223,7 @@ test('HEAD gets no body', async (t) => {
     res.writeHead(200, { 'content-type': 'application/json' });
     res.end();
   });
-  const pair = await bothWays(h, '/v1/models', { method: 'HEAD' });
+  const pair = await bothWays(h, '/v1/messages', { method: 'HEAD' });
   assert.equal(pair.gateway.res.status, 200);
   assert.equal(pair.gateway.body.length, 0);
 });

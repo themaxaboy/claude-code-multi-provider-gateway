@@ -6,6 +6,7 @@ import tls from 'node:tls';
 import { Readable, pipeline } from 'node:stream';
 import { ANTHROPIC_BASE_URL } from './config.js';
 import { buildRequestHeaders, buildResponseHeaders } from './headers.js';
+import { buildModelList, localModelEntries, MODELS_PATH } from './models.js';
 import { resolve } from './router.js';
 import { createUsageTap, formatUsage } from './usage.js';
 import { createDumper, logError, logRequest, logResponse, redactHeaders } from './log.js';
@@ -19,18 +20,33 @@ const HEADERS_TIMEOUT_MS = 120_000;
  */
 const IDLE_TIMEOUT_MS = 300_000;
 const TUNNEL_CONNECT_TIMEOUT_MS = 30_000;
+/**
+ * How long the model list may wait on Anthropic before being served without it.
+ * Claude Code gives model discovery 3s total, so this has to leave room.
+ */
+const MODELS_MERGE_TIMEOUT_MS = 1_500;
 const MAX_BODY_BYTES = 128 * 1024 * 1024;
 
 /**
  * @param {object} cfg  normalized config
- * @param {{dump?: string, verbose?: boolean, anthropicBaseUrl?: string}} options
- *        anthropicBaseUrl is injectable so tests can point the fallback at a stub
+ * @param {{dump?: string, verbose?: boolean, anthropicBaseUrl?: string,
+ *          modelsMergeTimeoutMs?: number}} options
+ *        anthropicBaseUrl and modelsMergeTimeoutMs are injectable so tests can
+ *        point the fallback at a stub and not wait a real timeout on it
  */
-export function createServer(cfg, { dump, verbose = false, anthropicBaseUrl = ANTHROPIC_BASE_URL } = {}) {
+export function createServer(
+  cfg,
+  {
+    dump,
+    verbose = false,
+    anthropicBaseUrl = ANTHROPIC_BASE_URL,
+    modelsMergeTimeoutMs = MODELS_MERGE_TIMEOUT_MS,
+  } = {},
+) {
   const dumper = createDumper(dump);
 
   const server = http.createServer((req, res) => {
-    handle(req, res, cfg, { dumper, verbose, anthropicBaseUrl }).catch((error) => {
+    handle(req, res, cfg, { dumper, verbose, anthropicBaseUrl, modelsMergeTimeoutMs }).catch((error) => {
       // A client that hung up is not worth reporting, and there is no longer
       // anywhere to report it to.
       if (res.destroyed || res.writableEnded) return;
@@ -141,8 +157,16 @@ function abortTunnel(socket, status, message) {
   socket.destroy();
 }
 
-async function handle(req, res, cfg, { dumper, verbose, anthropicBaseUrl }) {
+async function handle(req, res, cfg, { dumper, verbose, anthropicBaseUrl, modelsMergeTimeoutMs }) {
+  // Drained first even for the one path we answer ourselves: leaving a body
+  // unread on a keep-alive socket is what readBody's close guard exists to
+  // avoid, and a discovery GET has none, so it costs nothing.
   const body = await readBody(req);
+
+  if (isModelsList(req)) {
+    await serveModels(req, res, cfg, { dumper, verbose, anthropicBaseUrl, modelsMergeTimeoutMs });
+    return;
+  }
 
   let parsed = null;
   if (req.method === 'POST' && body.length) {
@@ -278,6 +302,119 @@ async function handle(req, res, cfg, { dumper, verbose, anthropicBaseUrl }) {
     finish();
   });
 }
+
+// ------------------------------------------------------------ model discovery
+
+/**
+ * The one path the gateway answers instead of proxying.
+ *
+ * Retrieve-by-id, `/v1/models/{id}`, is a different endpoint and stays a plain
+ * passthrough — as does anything but GET and HEAD on this one.
+ */
+function isModelsList(req) {
+  if (req.method !== 'GET' && req.method !== 'HEAD') return false;
+  return pathOf(req.url).replace(/\/+$/, '') === MODELS_PATH;
+}
+
+/**
+ * Serve the configured aliases, plus Anthropic's own list when it can be had
+ * cheaply. See src/models.js for why the ids look the way they do.
+ *
+ * HEAD needs no special case: Node drops the payload from end() on a HEAD
+ * response but keeps the content-length we wrote, which is why the merge is
+ * issued as a GET either way.
+ */
+async function serveModels(req, res, cfg, { dumper, verbose, anthropicBaseUrl, modelsMergeTimeoutMs }) {
+  logRequest({ providerName: 'ccmpg', model: 'discovery', path: pathOf(req.url) });
+
+  // Structurally the Anthropic path: the target is pinned to anthropicBaseUrl
+  // and resolve() is never consulted, so buildRequestHeaders is passed a null
+  // provider deliberately. That forwards the caller's credential untouched and
+  // keeps `anthropic-beta: oauth-2025-04-20` — the flag without which an OAuth
+  // Bearer is refused, and dropping it would 401 every subscriber's merge.
+  const target = anthropicBaseUrl + req.url;
+  const headers = buildRequestHeaders(req.headers, null);
+  const upstream = await fetchUpstreamModels(target, headers, modelsMergeTimeoutMs);
+
+  const list = buildModelList(cfg, upstream.data);
+  // Counted rather than subtracted: an upstream id that collides with an alias
+  // is deduped away, so the difference would not be the local count.
+  const local = localModelEntries(cfg).length;
+  const payload = Buffer.from(JSON.stringify(list));
+
+  dumper?.request({
+    method: 'GET',
+    url: req.url,
+    target: `${target} (models merge)`,
+    headers,
+    body: null,
+    status: upstream.note,
+  });
+  if (verbose) console.error(`    -> served locally; upstream ${anthropicBaseUrl}: ${upstream.note}`);
+
+  // Claude Code's 3s budget may have expired while the merge was in flight.
+  if (res.destroyed || res.writableEnded) return;
+
+  // Written by hand rather than through buildResponseHeaders: there is no
+  // upstream response to relay here, and relaying its content-length or etag
+  // would describe a body we did not send.
+  res.writeHead(200, {
+    'content-type': 'application/json',
+    'content-length': String(payload.length),
+    'cache-control': 'no-store', // Claude Code keeps its own disk cache
+  });
+  res.end(payload);
+
+  dumper?.response({ status: 200, chunks: [payload] });
+  logResponse({
+    providerName: 'ccmpg',
+    model: 'discovery',
+    status: 200,
+    usage: `${list.data.length} models (${local} local, ${upstream.note})`,
+  });
+}
+
+/**
+ * Anthropic's model list, or null and a reason. Never throws: a failure here
+ * costs the user the Anthropic half of the picker, not their model list.
+ *
+ * @returns {Promise<{data: object[]|null, note: string}>}
+ */
+async function fetchUpstreamModels(target, headers, timeoutMs) {
+  // A manual timer rather than AbortSignal.timeout(): the same signal has to
+  // cover the body read too, since headers can arrive fast and the body never.
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+
+  try {
+    const response = await fetch(target, {
+      method: 'GET',
+      headers,
+      signal: controller.signal,
+      // Same rule Claude Code applies to us: a redirect is a failure, not a hop.
+      redirect: 'manual',
+    });
+
+    if (response.status !== 200) {
+      // undici holds the connection open waiting for a body nobody reads.
+      response.body?.cancel?.();
+      return { data: null, note: `upstream: HTTP ${response.status}` };
+    }
+
+    const json = await response.json(); // throws on a non-JSON body — caught below
+    const data = Array.isArray(json?.data) ? json.data : null;
+    return { data, note: data ? `${data.length} upstream` : 'upstream: no data array' };
+  } catch (error) {
+    const reason = controller.signal.aborted
+      ? `timed out after ${timeoutMs}ms`
+      : (error?.message ?? 'unreachable');
+    return { data: null, note: `upstream: ${reason}` };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+// ----------------------------------------------------------------------------
 
 function readBody(req) {
   return new Promise((resolvePromise, reject) => {
