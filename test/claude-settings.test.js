@@ -147,17 +147,14 @@ test('several vars are written at once, and unrelated keys survive', () => {
 
   const result = applyEnv({
     cwd,
-    env: { ANTHROPIC_BASE_URL: URL, CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY: '1' },
+    env: { ANTHROPIC_BASE_URL: URL, CLAUDE_CODE_ATTRIBUTION_HEADER: '0' },
   });
 
   assert.equal(result.action, 'updated');
-  assert.deepEqual(result.changed.sort(), [
-    'ANTHROPIC_BASE_URL',
-    'CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY',
-  ]);
+  assert.deepEqual(result.changed.sort(), ['ANTHROPIC_BASE_URL', 'CLAUDE_CODE_ATTRIBUTION_HEADER']);
   assert.deepEqual(JSON.parse(fs.readFileSync(result.file, 'utf8')), {
     permissions: { allow: ['Bash'] },
-    env: { KEEP: 'me', ANTHROPIC_BASE_URL: URL, CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY: '1' },
+    env: { KEEP: 'me', ANTHROPIC_BASE_URL: URL, CLAUDE_CODE_ATTRIBUTION_HEADER: '0' },
   });
 });
 
@@ -165,20 +162,20 @@ test('a partially configured file reports only the key that changed', () => {
   const cwd = tmpdir();
   seed(cwd, JSON.stringify({ env: { ANTHROPIC_BASE_URL: URL } }));
 
-  // The upgrade path: someone who ran init before discovery existed.
+  // The upgrade path: a file written before a second var joined the set.
   const result = applyEnv({
     cwd,
-    env: { ANTHROPIC_BASE_URL: URL, CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY: '1' },
+    env: { ANTHROPIC_BASE_URL: URL, CLAUDE_CODE_ATTRIBUTION_HEADER: '0' },
   });
 
   assert.equal(result.action, 'updated');
-  assert.deepEqual(result.changed, ['CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY']);
-  assert.deepEqual(result.previous, { CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY: undefined });
+  assert.deepEqual(result.changed, ['CLAUDE_CODE_ATTRIBUTION_HEADER']);
+  assert.deepEqual(result.previous, { CLAUDE_CODE_ATTRIBUTION_HEADER: undefined });
 });
 
 test('nothing to change is unchanged even with several vars', () => {
   const cwd = tmpdir();
-  const env = { ANTHROPIC_BASE_URL: URL, CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY: '1' };
+  const env = { ANTHROPIC_BASE_URL: URL, CLAUDE_CODE_ATTRIBUTION_HEADER: '0' };
   applyEnv({ cwd, env });
   const second = applyEnv({ cwd, env });
   assert.equal(second.action, 'unchanged');

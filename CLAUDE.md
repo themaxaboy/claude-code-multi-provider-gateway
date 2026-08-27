@@ -55,8 +55,14 @@ configurable — that is what keeps Claude Code subscriptions working.
 
 `GET`/`HEAD` on exactly `/v1/models` is served locally by `serveModels` in `src/server.js`;
 everything else, `/v1/models/{id}` included, is still proxied. Claude Code asks for that list at
-startup when the user sets `CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1`, and shows what comes back
-in the `/model` picker under "From gateway". `ccmpg init` writes that variable.
+startup when the user sets `CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1`, and is supposed to show
+what comes back in the `/model` picker under "From gateway".
+
+**`ccmpg init` deliberately does NOT write that variable.** Serving the endpoint was verified end to
+end; the picker actually populating from it was not — it did not work when tried, and the cause is on
+the Claude Code side, not here. Until that is understood, the endpoint ships and the switch stays a
+manual opt-in documented in the README. Do not add the variable back to `init` without confirming the
+picker really lists the aliases.
 
 **Claude Code keeps a discovered entry only when its `id` contains `claude` or `anthropic`,
 case-insensitively.** A bare alias like `minimax` is dropped before it reaches the picker, so

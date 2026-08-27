@@ -11,14 +11,13 @@ import { cyan, dim, green, red, yellow } from '../log.js';
 const SETTINGS_ENTRY = '.claude/settings.local.json';
 
 /**
- * The env vars that make Claude Code use the gateway. The discovery flag is what
- * puts the models: aliases in the /model picker; without it Claude Code never
- * asks for the list. Values must be strings — Claude Code reads env as strings.
+ * The env vars that point Claude Code at the gateway. Values must be strings.
+ *
+ * Deliberately just the base URL. The gateway also serves GET /v1/models, which
+ * Claude Code reads only when CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1 —
+ * but that is left for the user to set, not written here. See the README.
  */
-const settingsEnv = (url) => ({
-  ANTHROPIC_BASE_URL: url,
-  CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY: '1',
-});
+const settingsEnv = (url) => ({ ANTHROPIC_BASE_URL: url });
 
 const template = (port) => `version: 1
 
@@ -78,7 +77,7 @@ export async function init(flags = {}) {
 
   if (wantSettings) {
     const result = applyEnv({ global, env: settingsEnv(url) });
-    const detail = dim(`(ANTHROPIC_BASE_URL=${url} + model discovery)`);
+    const detail = dim(`(ANTHROPIC_BASE_URL=${url})`);
 
     switch (result.action) {
       case 'created':
@@ -133,13 +132,11 @@ export async function init(flags = {}) {
   } else {
     console.log(`  ${step}. Point Claude Code at it yourself:`);
     console.log(`     ${cyan(`export ANTHROPIC_BASE_URL=${url}`)}`);
-    console.log(`     ${cyan('export CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1')}`);
-    console.log(dim(`     or add both under  "env"  in ${short(target)}`));
+    console.log(dim(`     or add  "env": { "ANTHROPIC_BASE_URL": "${url}" }  to ${short(target)}`));
   }
 
   console.log('');
   console.log(dim('  Anthropic models need no entry — anything not in models: goes straight through.'));
-  console.log(dim('  Your models: aliases show up in /model once the gateway is running.'));
 
   return 0;
 }
