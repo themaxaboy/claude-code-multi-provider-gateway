@@ -131,7 +131,10 @@ export function normalize(raw, { sources, files, env = process.env } = {}) {
     providers[name] = {
       ...entry,
       base_url: String(entry.base_url).replace(/\/+$/, ''),
-      api_key: entry.api_key === undefined ? undefined : String(entry.api_key),
+      // `== null` on purpose: YAML `api_key:` with no value parses to null,
+      // and String(null) is the literal "null" — which reads as a real
+      // credential downstream and ships `Bearer null` to the provider.
+      api_key: entry.api_key == null ? undefined : String(entry.api_key),
     };
   }
 

@@ -1,26 +1,39 @@
 // Register the gateway to launch at boot, using whatever the OS provides.
 
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { loadConfig } from '../config.js';
+import { ConfigError, loadConfig } from '../config.js';
 import { cyan, dim, green, red } from '../log.js';
 import * as daemon from '../daemon.js';
 
 const BIN = fileURLToPath(new URL('../../bin/ccmpg.js', import.meta.url));
 
+/**
+ * A boot entry is named after its scope.
+ *
+ * The basename alone is not enough: it can contain characters systemd and
+ * launchd reject, and two checkouts sharing one (~/work/api and ~/oss/api)
+ * would overwrite each other's entry. The hash of the absolute path keeps them
+ * apart, the same way the daemon registry does.
+ */
 function unitName(flags) {
-  return flags.global ? 'ccmpg' : `ccmpg-${path.basename(process.cwd())}`;
+  if (flags.global) return 'ccmpg';
+  const cwd = path.resolve(process.cwd());
+  const base = path.basename(cwd).replace(/[^A-Za-z0-9_-]/g, '-') || 'project';
+  const hash = crypto.createHash('sha1').update(cwd).digest('hex').slice(0, 8);
+  return `ccmpg-${base}-${hash}`;
 }
 
 /** Arguments the boot entry should launch with. */
 function serveArgs(flags) {
   const args = ['__serve'];
   if (flags.global) args.push('-g');
-  if (flags.port) args.push('--port', String(flags.port));
-  if (flags.host) args.push('--host', flags.host);
+  if (flags.port !== undefined) args.push('--port', String(flags.port));
+  if (flags.host !== undefined) args.push('--host', flags.host);
   return args;
 }
 
@@ -29,8 +42,18 @@ export function startup(flags) {
   // no boot entry at all.
   const cfg = loadConfig({ globalOnly: flags.global });
   const port = flags.port ?? cfg.server.port;
+  const host = flags.host ?? cfg.server.host;
 
-  const target = { name: unitName(flags), cwd: process.cwd(), args: serveArgs(flags), port };
+  const target = {
+    name: unitName(flags),
+    cwd: process.cwd(),
+    args: serveArgs(flags),
+    host,
+    port,
+    // The same file `ccmpg logs` reads, so boot-launched and `start -d`
+    // gateways are inspected the same way.
+    log: daemon.logFileFor(daemon.scopeKey({ global: flags.global })),
+  };
 
   switch (process.platform) {
     case 'darwin':
@@ -68,9 +91,8 @@ function launchdPlistPath(name) {
   return path.join(os.homedir(), 'Library', 'LaunchAgents', `com.${name}.plist`);
 }
 
-function installLaunchd({ name, cwd, args, port }) {
+function installLaunchd({ name, cwd, args, host, port, log }) {
   const file = launchdPlistPath(name);
-  const log = path.join(daemon.STATE_DIR, `${name}.boot.log`);
   fs.mkdirSync(path.dirname(file), { recursive: true });
   fs.mkdirSync(daemon.STATE_DIR, { recursive: true });
 
@@ -99,10 +121,12 @@ ${argv}
 `,
   );
 
-  run('launchctl', ['unload', file], { ignoreFailure: true });
-  run('launchctl', ['load', '-w', file]);
+  activate(file, () => {
+    run('launchctl', ['unload', file], { ignoreFailure: true });
+    run('launchctl', ['load', '-w', file]);
+  });
 
-  return report(file, port, `launchctl unload -w ${file}`);
+  return report(file, { host, port, undo: `launchctl unload -w ${file}` });
 }
 
 function removeLaunchd({ name }) {
@@ -119,9 +143,10 @@ function systemdUnitPath(name) {
   return path.join(os.homedir(), '.config', 'systemd', 'user', `${name}.service`);
 }
 
-function installSystemd({ name, cwd, args, port }) {
+function installSystemd({ name, cwd, args, host, port, log }) {
   const file = systemdUnitPath(name);
   fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.mkdirSync(daemon.STATE_DIR, { recursive: true });
 
   const exec = [process.execPath, BIN, ...args].map(quoteUnit).join(' ');
 
@@ -135,6 +160,8 @@ After=network-online.target
 Type=simple
 WorkingDirectory=${cwd}
 ExecStart=${exec}
+StandardOutput=append:${log}
+StandardError=append:${log}
 Restart=on-failure
 RestartSec=5
 
@@ -143,11 +170,13 @@ WantedBy=default.target
 `,
   );
 
-  run('systemctl', ['--user', 'daemon-reload']);
-  run('systemctl', ['--user', 'enable', '--now', `${name}.service`]);
+  activate(file, () => {
+    run('systemctl', ['--user', 'daemon-reload']);
+    run('systemctl', ['--user', 'enable', '--now', `${name}.service`]);
+  });
 
   console.log(dim('  tip: loginctl enable-linger keeps it up without an active login'));
-  return report(file, port, `systemctl --user disable --now ${name}.service`);
+  return report(file, { host, port, undo: `systemctl --user disable --now ${name}.service` });
 }
 
 function removeSystemd({ name }) {
@@ -174,13 +203,14 @@ function windowsEntryPath(name) {
   return path.join(startupFolder(), `${name}.vbs`);
 }
 
-function installWindows({ name, cwd, args, port }) {
+function installWindows({ name, cwd, args, host, port }) {
   const file = windowsEntryPath(name);
   fs.mkdirSync(path.dirname(file), { recursive: true });
 
-  // Inside a VBScript string literal a double quote is written twice.
+  // Inside a VBScript string literal a double quote is written twice — which is
+  // both how an argument gets quoted and how a quote inside one is escaped.
   const command = [process.execPath, BIN, ...args]
-    .map((a) => (/\s/.test(a) ? `""${a}""` : a))
+    .map((a) => (/\s/.test(a) ? `""${quoteVbs(a)}""` : quoteVbs(a)))
     .join(' ');
 
   fs.writeFileSync(
@@ -189,12 +219,14 @@ function installWindows({ name, cwd, args, port }) {
 ' Remove it with:  ccmpg unstartup${args.includes('-g') ? ' -g' : ''}
 ' Or just delete this file.
 Set shell = CreateObject("WScript.Shell")
-shell.CurrentDirectory = "${cwd}"
+shell.CurrentDirectory = "${quoteVbs(cwd)}"
 shell.Run "${command}", 0, False
 `,
   );
 
-  return report(file, port, `del "${file}"`);
+  // Unlike launchctl and systemctl, dropping a file in the Startup folder does
+  // not run it — so do not claim anything is listening yet.
+  return report(file, { host, port, undo: `del "${file}"`, active: false });
 }
 
 function removeWindows({ name }) {
@@ -212,15 +244,35 @@ function run(command, args, { ignoreFailure = false } = {}) {
   } catch (error) {
     if (ignoreFailure) return;
     const detail = error.stderr?.toString().trim() || error.message;
-    throw new Error(`${command} ${args.join(' ')} failed: ${detail}`);
+    // A ConfigError prints as a message, not a stack: every way this fails —
+    // no D-Bus session, launchctl refusing the label — is the user's to fix.
+    throw new ConfigError(`${command} ${args.join(' ')} failed: ${detail}`, {
+      hint: 'No boot entry was installed. You can still run:  ccmpg start -d',
+    });
   }
 }
 
-function report(where, port, undoCommand) {
+/** Roll the unit file back if the tool meant to activate it refuses. */
+function activate(file, steps) {
+  try {
+    steps();
+  } catch (error) {
+    fs.rmSync(file, { force: true });
+    throw error;
+  }
+}
+
+function report(where, { host, port, undo, active = true }) {
+  const url = `http://${host.includes(':') ? `[${host}]` : host}:${port}`;
   console.log(`${green('registered')} ${where}`);
-  console.log(`  ${dim('listens on')} http://127.0.0.1:${port} ${dim('after every boot')}`);
+  if (active) {
+    console.log(`  ${dim('listening on')} ${url} ${dim('now, and after every boot')}`);
+  } else {
+    console.log(`  ${dim('starts on')} ${url} ${dim('at your next sign-in')}`);
+    console.log(`  ${dim('start it now with')} ${cyan('ccmpg start -d')}`);
+  }
   console.log('');
-  console.log(`  ${dim('undo with')} ${cyan('ccmpg unstartup')} ${dim(`(or: ${undoCommand})`)}`);
+  console.log(`  ${dim('undo with')} ${cyan('ccmpg unstartup')} ${dim(`(or: ${undo})`)}`);
   return 0;
 }
 
@@ -238,4 +290,4 @@ const escapeXml = (s) =>
   s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 
 const quoteUnit = (s) => (/[\s"]/.test(s) ? `"${s.replace(/"/g, '\\"')}"` : s);
-const quoteWin = (s) => (/\s/.test(s) ? `\\"${s}\\"` : s);
+const quoteVbs = (s) => s.replace(/"/g, '""');

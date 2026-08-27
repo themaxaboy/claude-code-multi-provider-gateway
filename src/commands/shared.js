@@ -3,18 +3,13 @@
 import { loadDocument } from '../edit.js';
 import { dim } from '../log.js';
 
+// One masker for the whole project — it also guards --verbose and --dump.
+export { maskKey } from '../log.js';
+
 /** The raw contents of just the scope being edited — not the merged view. */
 export function readScope(flags) {
   const { doc } = loadDocument({ global: flags.global });
   return doc.toJS() ?? {};
-}
-
-/** sk-or-v1-c1f9…5320 — enough to recognise, not enough to use. */
-export function maskKey(value) {
-  if (!value) return '';
-  if (value.startsWith('${')) return value; // an env reference is not a secret
-  if (value.length <= 12) return `${value.slice(0, 2)}${'*'.repeat(value.length - 2)}`;
-  return `${value.slice(0, 8)}\u2026${value.slice(-4)}`;
 }
 
 const strip = (s) => String(s).replace(/\u001b\[[0-9;]*m/g, '');

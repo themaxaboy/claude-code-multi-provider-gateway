@@ -9,9 +9,15 @@ import { start } from './start.js';
 
 export function stop(flags) {
   const key = daemon.scopeKey({ global: flags.global });
-  const stopped = daemon.stop(key);
+  const result = daemon.stop(key);
 
-  if (!stopped) {
+  if (result === 'stale') {
+    console.error(red(`The recorded pid for the ${daemon.scopeLabel(key)} scope belongs to another program.`));
+    console.error(dim('Nothing was stopped; the stale entry has been cleared.'));
+    return 1;
+  }
+
+  if (result !== 'stopped') {
     console.error(`Nothing running for the ${daemon.scopeLabel(key)} scope.`);
     return 1;
   }
@@ -38,11 +44,13 @@ export function status(flags) {
   const running = daemon.list();
   const rows = [];
 
-  const scopes = flags.all
-    ? running.map((entry) => entry.key)
-    : [daemon.scopeKey({ global: true }), daemon.scopeKey({ global: false })];
+  const scopes = new Set(
+    flags.all
+      ? running.map((entry) => entry.key)
+      : [daemon.scopeKey({ global: true }), daemon.scopeKey({ global: false })],
+  );
 
-  for (const key of new Set(scopes)) {
+  for (const key of scopes) {
     const entry = running.find((r) => r.key === key);
     const isGlobal = key === 'global';
 
@@ -71,7 +79,12 @@ export function status(flags) {
 
   printTable(['SCOPE', 'STATUS', 'PID', 'PORT', 'UPTIME', 'CONFIG'], rows);
 
-  if (!flags.all && running.length > rows.filter((r) => !r[1].includes('stopped')).length) {
+  // Compare against what is actually on screen: the old check counted
+  // "no config" rows as running, so it stayed silent in exactly the case it
+  // exists for.
+  const hidden = running.filter((entry) => !scopes.has(entry.key)).length;
+
+  if (!flags.all && hidden > 0) {
     console.log('');
     console.log(dim('Other gateways are running elsewhere. Use  ccmpg status -a  to see them.'));
   }
@@ -93,7 +106,13 @@ export async function logs(flags) {
   const { size } = fs.statSync(file);
   const from = Math.max(0, size - tailBytes);
 
-  process.stdout.write(fs.readFileSync(file, 'utf8').slice(from ? 1 : 0));
+  // A byte offset needs a byte-addressed read: slicing a decoded string by it
+  // both mixes units and, as `from ? 1 : 0`, dropped one character instead of
+  // skipping to the tail — so the whole file was printed.
+  if (size > 0) {
+    const head = fs.createReadStream(file, { start: from });
+    for await (const chunk of head) process.stdout.write(chunk);
+  }
 
   if (!flags.follow) return 0;
 

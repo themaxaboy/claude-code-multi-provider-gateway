@@ -1,7 +1,24 @@
 {
   "name": "ccmpg",
   "version": "1.0.0",
-  "description": "Claude Code Multi-Provider Gateway \u2014 Anthropic-compatible proxy that routes by model name",
+  "description": "Claude Code Multi-Provider Gateway — Anthropic-compatible proxy that routes by model name",
+  "keywords": [
+    "claude-code",
+    "anthropic",
+    "proxy",
+    "gateway",
+    "llm"
+  ],
+  "homepage": "https://github.com/themaxaboy/claude-code-multi-provider-gateway#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/themaxaboy/claude-code-multi-provider-gateway.git"
+  },
+  "bugs": {
+    "url": "https://github.com/themaxaboy/claude-code-multi-provider-gateway/issues"
+  },
+  "author": "themaxaboy",
+  "license": "MIT",
   "type": "module",
   "bin": {
     "ccmpg": "bin/ccmpg.js"
@@ -9,7 +26,8 @@
   "files": [
     "bin",
     "src",
-    "README.md"
+    "README.md",
+    "LICENSE"
   ],
   "engines": {
     "node": ">=20"
@@ -22,16 +40,9 @@
     "install:global": "npm install --global .",
     "uninstall:global": "npm uninstall --global ccmpg",
     "link": "npm link",
-    "unlink": "npm unlink --global ccmpg"
+    "unlink": "npm unlink --global ccmpg",
+    "prepublishOnly": "npm test"
   },
-  "keywords": [
-    "claude-code",
-    "anthropic",
-    "proxy",
-    "gateway",
-    "llm"
-  ],
-  "license": "MIT",
   "dependencies": {
     "@inquirer/prompts": "^7.2.1",
     "yaml": "^2.6.1"

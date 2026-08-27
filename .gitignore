@@ -1,5 +1,11 @@
 node_modules/
 
+# คอนฟิกอาจมี API key จริง — อย่า commit
+.ccmpg.yaml
+
+# ไฟล์ตั้งค่าส่วนตัวของ Claude Code
+.claude/settings.local.json
+
 # ผลจาก --dump มีทั้ง header และ body ของทุก request
 dump.log
 *.log

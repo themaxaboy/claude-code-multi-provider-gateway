@@ -159,3 +159,61 @@ test('a non-JSON body is forwarded untouched to Anthropic', async (t) => {
   });
   assert.equal(anthropic.received[0].body, 'not json at all');
 });
+
+/** Resolves once `check` returns true, or rejects after `ms`. */
+async function waitFor(check, ms = 4000) {
+  const deadline = Date.now() + ms;
+  while (Date.now() < deadline) {
+    if (check()) return;
+    await new Promise((r) => setTimeout(r, 20));
+  }
+  throw new Error('timed out waiting for condition');
+}
+
+test('a client that hangs up mid-stream aborts the upstream request', async (t) => {
+  // Without this the provider keeps streaming — and keeps charging — into a
+  // socket nobody is reading. Esc mid-turn does exactly this.
+  let upstreamAborted = false;
+  let streaming = false;
+
+  const upstream = http.createServer((req, res) => {
+    req.resume();
+    req.on('end', () => {
+      res.writeHead(200, { 'content-type': 'text/event-stream' });
+      res.write('event: ping\ndata: {"type":"ping"}\n\n');
+      streaming = true;
+      // Deliberately never ended: only the client going away can close this.
+    });
+    res.on('close', () => {
+      if (!res.writableEnded) upstreamAborted = true;
+    });
+  });
+
+  const upstreamPort = await listen(upstream);
+  const cfg = normalize({ providers: {}, models: {} }, { env: {} });
+  const gateway = createServer(cfg, { anthropicBaseUrl: `http://127.0.0.1:${upstreamPort}` });
+  const gatewayPort = await listen(gateway);
+
+  t.after(async () => {
+    await close(gateway);
+    await close(upstream);
+  });
+
+  const request = http.request({
+    host: '127.0.0.1',
+    port: gatewayPort,
+    path: '/v1/messages',
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+  });
+  request.on('error', () => {}); // destroying it below is the point
+  request.end(JSON.stringify({ model: 'claude-sonnet-4', stream: true }));
+
+  await waitFor(() => streaming);
+  assert.equal(upstreamAborted, false, 'still connected while the client is listening');
+
+  request.destroy();
+
+  await waitFor(() => upstreamAborted);
+  assert.equal(upstreamAborted, true);
+});

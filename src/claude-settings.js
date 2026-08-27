@@ -17,10 +17,15 @@ export function settingsPath({ global = false, cwd = process.cwd() } = {}) {
     : path.join(cwd, '.claude', 'settings.local.json');
 }
 
+/** Wildcard binds, and loopback in either family, are all reached as localhost. */
+const LOCALHOST_BINDS = new Set(['127.0.0.1', '0.0.0.0', '::', '::1']);
+
 export function baseUrlFor({ host = '127.0.0.1', port = 8787 } = {}) {
   // 127.0.0.1 is what the gateway binds, but localhost reads better and Node
   // clients try both families.
-  const shown = host === '127.0.0.1' || host === '0.0.0.0' ? 'localhost' : host;
+  if (LOCALHOST_BINDS.has(host)) return `http://localhost:${port}`;
+  // A bare IPv6 literal needs brackets, or the result is not a parseable URL.
+  const shown = host.includes(':') ? `[${host}]` : host;
   return `http://${shown}:${port}`;
 }
 

@@ -214,6 +214,31 @@ ccmpg model rm glm -y
 คำสั่งกลุ่มนี้แก้ YAML โดยรักษาคอมเมนต์เดิม และตรวจก่อนเขียนเสมอ — `model add` ปฏิเสธถ้า provider ไม่มีอยู่
 `provider rm` ปฏิเสธถ้ายังมี alias อ้างถึง เมื่อไม่ได้รันบน terminal จริงจะไม่ถาม แต่ฟ้องว่าขาด flag ตัวไหน
 
+### Flag ทั้งหมด
+
+| Flag | ใช้กับ | ทำอะไร |
+| --- | --- | --- |
+| `-g`, `--global` | ทุกคำสั่ง | ทำงานกับ `~/.config/ccmpg/.ccmpg.yaml` |
+| `-d`, `--detach` | `start` | รันเบื้องหลัง |
+| `-p`, `--port <number>` | `start`, `startup`, `init` | override `server.port` (1–65535) |
+| `--host <addr>` | `start`, `startup` | override `server.host` |
+| `--dump [file]` | `start` | บันทึกทุก request/response (ค่าเริ่มต้น `dump.log`) |
+| `-v`, `--verbose` | `start` | พิมพ์ header ที่ส่งออกและ URL ปลายทาง |
+| `-f`, `--follow` | `logs` | ตามดูต่อเนื่อง |
+| `-a`, `--all` | `status` | แสดง gateway ที่รันอยู่ทุกตัว ไม่ใช่แค่ scope ปัจจุบัน |
+| `-y`, `--yes` | `provider rm`, `model rm`, `init` | ตอบ yes ให้คำถามยืนยัน |
+| `--force` | `init` | เขียนทับ `.ccmpg.yaml` ที่มีอยู่แล้ว |
+| `--cascade` | `provider rm` | ลบ model alias ที่อ้างถึง provider นั้นไปด้วย |
+| `--no-settings` | `init` | ไม่ต้องแก้ settings ของ Claude Code |
+| `--no-gitignore` | `init` | ไม่ต้องแก้ `.gitignore` |
+| `--base-url`, `--api-key` | `provider add` | ใส่ค่าแทนการถามทีละข้อ |
+| `--model`, `--provider` | `model add` | ใส่ค่าแทนการถามทีละข้อ |
+| `--version`, `-h`/`--help` | — | เวอร์ชัน · วิธีใช้ |
+
+> **`--dump` เก็บ body ของทุก request และ response ลงไฟล์** — API key ถูก mask แล้ว
+> แต่เนื้อหาบทสนทนาไม่ได้ถูกปิด ให้ถือว่าไฟล์นี้เป็นข้อมูลอ่อนไหว `ccmpg init`
+> เพิ่ม `dump.log` ให้ใน `.gitignore` อยู่แล้ว
+
 ### แจ้งเตือนเวอร์ชันใหม่
 
 เมื่อมีเวอร์ชันใหม่บน npm ccmpg จะขึ้นข้อความแบบเดียวกับ npm:
@@ -323,7 +348,7 @@ ccmpg/
 `ccmpg start -d` เก็บ pid และ log ไว้ที่ `~/.local/state/ccmpg/` เป็น runtime state ลบทิ้งได้เมื่อไม่มีอะไรรันอยู่
 
 ```bash
-git clone https://github.com/your-name/ccmpg.git && cd ccmpg
+git clone https://github.com/themaxaboy/claude-code-multi-provider-gateway.git && cd claude-code-multi-provider-gateway
 npm install
 node bin/ccmpg.js init    # สร้าง .ccmpg.yaml ก่อน แล้วแก้ให้ตรงกับ provider ของคุณ
 npm run dev

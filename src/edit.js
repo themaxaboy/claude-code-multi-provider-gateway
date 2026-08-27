@@ -49,7 +49,9 @@ export function patch(scope, mutate) {
   fs.mkdirSync(path.dirname(file), { recursive: true });
 
   const tmp = `${file}.${process.pid}.tmp`;
-  fs.writeFileSync(tmp, text);
+  // 0600: this file holds plaintext api_key values, and the tmp file's mode
+  // is what survives the rename.
+  fs.writeFileSync(tmp, text, { mode: 0o600 });
   fs.renameSync(tmp, file);
 
   return { file, created };

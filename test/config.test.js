@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { loadConfig, interpolate, ConfigError } from '../src/config.js';
+import { loadConfig, interpolate, normalize, ConfigError } from '../src/config.js';
 
 function tmpdir() {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'ccmpg-test-'));
@@ -174,4 +174,32 @@ test('any version other than 1 is rejected', () => {
     () => loadConfig({ globalPath: file, projectPath: path.join(dir, 'none.yaml') }),
     /version: 1/,
   );
+});
+
+test('api_key: with no value is absent, not the string "null"', () => {
+  // YAML `api_key:` parses to null, and String(null) is "null" — which reads as
+  // a real credential downstream and sends `Bearer null` to the provider.
+  const cfg = normalize(
+    {
+      version: 1,
+      providers: { p: { base_url: 'https://example.test', api_key: null } },
+      models: {},
+    },
+    { env: {} },
+  );
+
+  assert.equal(cfg.providers.p.api_key, undefined);
+});
+
+test('an unset ${ENV_VAR} leaves api_key empty rather than inventing one', () => {
+  const cfg = normalize(
+    {
+      version: 1,
+      providers: { p: { base_url: 'https://example.test', api_key: '${NOT_SET_ANYWHERE}' } },
+      models: {},
+    },
+    { env: {} },
+  );
+
+  assert.equal(cfg.providers.p.api_key, '');
 });

@@ -1,4 +1,10 @@
-import { loadConfig } from '../config.js';
+import {
+  globalConfigPath,
+  loadConfig,
+  mergeConfigs,
+  projectConfigPath,
+  readConfigFile,
+} from '../config.js';
 import { ensureMap, patch } from '../edit.js';
 import { ask, askSecret, askChoice, confirm } from '../prompt.js';
 import { cyan, dim, green, red, yellow } from '../log.js';
@@ -101,6 +107,18 @@ async function remove(nameArg, flags) {
     return 1;
   }
 
+  // patch() validates only the file it edits, so nothing here has yet looked at
+  // the other scope. Removing a provider that its aliases depend on used to
+  // succeed and leave a merged config no command could load — recoverable only
+  // by hand-editing YAML.
+  const orphans = orphanedByRemoval(name, flags, dependents);
+  if (orphans.length) {
+    const other = flags.global ? 'project' : 'global';
+    console.error(red(`Cannot remove "${name}" — model aliases in the ${other} config point at it: ${orphans.join(', ')}`));
+    console.error(dim(`Remove those first:  ccmpg model rm <alias>${flags.global ? '' : ' -g'}`));
+    return 1;
+  }
+
   const what = dependents.length
     ? `Remove "${name}" and ${dependents.length} alias(es): ${dependents.join(', ')}?`
     : `Remove provider "${name}"?`;
@@ -140,4 +158,33 @@ function list(flags) {
     }),
   );
   return 0;
+}
+
+/**
+ * Aliases anywhere that this removal would leave pointing at nothing.
+ *
+ * Answered by re-merging both scopes with the removal applied, rather than by
+ * reasoning about precedence: the provider may still be defined in the other
+ * file, in which case nothing breaks at all.
+ */
+function orphanedByRemoval(name, flags, alsoRemoved) {
+  let globalRaw;
+  let projectRaw;
+  try {
+    globalRaw = readConfigFile(globalConfigPath());
+    projectRaw = readConfigFile(projectConfigPath());
+  } catch {
+    return []; // unreadable already; the edit is not what broke it
+  }
+
+  const scoped = flags.global ? globalRaw : projectRaw;
+  if (scoped?.providers) delete scoped.providers[name];
+  if (scoped?.models) for (const alias of alsoRemoved) delete scoped.models[alias];
+
+  const { merged } = mergeConfigs(globalRaw, projectRaw);
+  if (merged.providers[name]) return []; // the other scope still defines it
+
+  return Object.entries(merged.models ?? {})
+    .filter(([, entry]) => entry?.provider === name)
+    .map(([alias]) => alias);
 }

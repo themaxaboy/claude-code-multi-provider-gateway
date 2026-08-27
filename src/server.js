@@ -3,14 +3,23 @@
 import http from 'node:http';
 import net from 'node:net';
 import tls from 'node:tls';
-import { Readable } from 'node:stream';
+import { Readable, pipeline } from 'node:stream';
 import { ANTHROPIC_BASE_URL } from './config.js';
 import { buildRequestHeaders, buildResponseHeaders } from './headers.js';
 import { resolve } from './router.js';
 import { createUsageTap, formatUsage } from './usage.js';
-import { createDumper, logError, logRequest, logResponse } from './log.js';
+import { createDumper, logError, logRequest, logResponse, redactHeaders } from './log.js';
 
-const REQUEST_TIMEOUT_MS = 300_000;
+/** How long upstream may take to send response headers. */
+const HEADERS_TIMEOUT_MS = 120_000;
+/**
+ * Longest gap allowed *between* body chunks. Deliberately not a wall-clock
+ * budget over the whole exchange: a long turn can legitimately stream for far
+ * more than it took to start, and a single deadline truncates it mid-answer.
+ */
+const IDLE_TIMEOUT_MS = 300_000;
+const TUNNEL_CONNECT_TIMEOUT_MS = 30_000;
+const MAX_BODY_BYTES = 128 * 1024 * 1024;
 
 /**
  * @param {object} cfg  normalized config
@@ -22,6 +31,9 @@ export function createServer(cfg, { dump, verbose = false, anthropicBaseUrl = AN
 
   const server = http.createServer((req, res) => {
     handle(req, res, cfg, { dumper, verbose, anthropicBaseUrl }).catch((error) => {
+      // A client that hung up is not worth reporting, and there is no longer
+      // anywhere to report it to.
+      if (res.destroyed || res.writableEnded) return;
       logError(error?.message ?? String(error));
       sendError(res, 502, 'proxy_error', error?.message ?? 'Unknown proxy error');
     });
@@ -56,6 +68,10 @@ function tunnel(req, clientSocket, head, { anthropicBaseUrl, verbose }) {
 
   logRequest({ providerName: null, model: 'upgrade', path: pathOf(req.url) });
 
+  // True once the tunnel is carrying bytes. Past that point an HTTP error
+  // response is no longer something the client can parse.
+  let established = false;
+
   const onReady = () => {
     // Rebuild the request line by hand: Upgrade and Connection must survive,
     // which is exactly what the normal header filter strips.
@@ -75,6 +91,10 @@ function tunnel(req, clientSocket, head, { anthropicBaseUrl, verbose }) {
     upstream.pipe(clientSocket);
     clientSocket.pipe(upstream);
 
+    // Silence is normal once a tunnel is open, so the connect deadline goes away.
+    upstream.setTimeout(0);
+    established = true;
+
     if (verbose) console.error(`    -> ${target.href} (tunnel)`);
   };
 
@@ -86,8 +106,21 @@ function tunnel(req, clientSocket, head, { anthropicBaseUrl, verbose }) {
       )
     : net.connect({ host: target.hostname, port }, onReady);
 
+  // Covers the connect phase only, and is cleared in onReady. Without it a
+  // black-holed upstream leaves the client hanging with no reply, forever.
+  upstream.setTimeout(TUNNEL_CONNECT_TIMEOUT_MS, () => {
+    if (!established) upstream.destroy(new Error(`connect to ${target.origin} timed out`));
+  });
+
   upstream.on('error', (error) => {
     logError(`tunnel failed: ${error.message}`);
+    if (established) {
+      // Writing an HTTP response now would splice status-line bytes into the
+      // middle of a WebSocket frame stream. Just close both ends.
+      clientSocket.destroy();
+      upstream.destroy();
+      return;
+    }
     abortTunnel(clientSocket, 502, `Cannot reach ${target.origin}`);
   });
 
@@ -130,8 +163,37 @@ async function handle(req, res, cfg, { dumper, verbose, anthropicBaseUrl }) {
   logRequest({ providerName: route.providerName, model: route.model, path: pathOf(req.url) });
   if (verbose) {
     console.error(`    -> ${target}`);
-    console.error(`    ${JSON.stringify(headers)}`);
+    // Masked: this goes to stderr, which for a background gateway is the log
+    // file that `ccmpg logs` prints straight to stdout.
+    console.error(`    ${JSON.stringify(redactHeaders(headers))}`);
   }
+
+  const controller = new AbortController();
+  let timedOut = false;
+  let clientGone = false;
+
+  const abort = () => {
+    if (!controller.signal.aborted) controller.abort();
+  };
+
+  // The client hanging up — Esc mid-turn, a routine event — must stop the
+  // upstream too. Otherwise the provider keeps streaming, and keeps charging,
+  // into a socket nobody is reading.
+  res.on('close', () => {
+    if (!res.writableEnded) {
+      clientGone = true;
+      abort();
+    }
+  });
+  res.on('error', () => {
+    clientGone = true;
+    abort();
+  });
+
+  const headersTimer = setTimeout(() => {
+    timedOut = true;
+    abort();
+  }, HEADERS_TIMEOUT_MS);
 
   let upstream;
   try {
@@ -139,15 +201,20 @@ async function handle(req, res, cfg, { dumper, verbose, anthropicBaseUrl }) {
       method: req.method,
       headers,
       body: ['GET', 'HEAD'].includes(req.method) ? undefined : outboundBody,
-      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+      signal: controller.signal,
       redirect: 'manual',
     });
   } catch (error) {
-    const reason = error?.name === 'TimeoutError' ? `Upstream timed out after ${REQUEST_TIMEOUT_MS / 1000}s` : `Cannot reach ${base}: ${error?.message ?? error}`;
+    clearTimeout(headersTimer);
+    if (clientGone) return; // nobody left to tell
+    const reason = timedOut
+      ? `Upstream sent no response headers within ${HEADERS_TIMEOUT_MS / 1000}s`
+      : `Cannot reach ${base}: ${error?.message ?? error}`;
     logResponse({ providerName: route.providerName, model: route.model, status: 502, usage: reason });
     sendError(res, 502, 'upstream_unreachable', reason);
     return;
   }
+  clearTimeout(headersTimer);
 
   dumper?.request({
     method: req.method,
@@ -157,6 +224,8 @@ async function handle(req, res, cfg, { dumper, verbose, anthropicBaseUrl }) {
     body: outboundBody,
     status: upstream.status,
   });
+
+  if (clientGone) return;
 
   res.writeHead(upstream.status, buildResponseHeaders(upstream.headers));
 
@@ -171,9 +240,23 @@ async function handle(req, res, cfg, { dumper, verbose, anthropicBaseUrl }) {
 
   const source = Readable.fromWeb(upstream.body.pipeThrough(tap.stream));
 
-  if (dumpChunks) source.on('data', (chunk) => dumpChunks.push(Buffer.from(chunk)));
+  let idleTimer;
+  const bumpIdle = () => {
+    clearTimeout(idleTimer);
+    idleTimer = setTimeout(() => {
+      timedOut = true;
+      abort();
+    }, IDLE_TIMEOUT_MS);
+  };
+
+  source.on('data', (chunk) => {
+    bumpIdle();
+    if (dumpChunks) dumpChunks.push(Buffer.from(chunk));
+  });
+  bumpIdle();
 
   const finish = () => {
+    clearTimeout(idleTimer);
     if (dumpChunks) dumper.response({ status: upstream.status, chunks: dumpChunks });
     logResponse({
       providerName: route.providerName,
@@ -183,23 +266,44 @@ async function handle(req, res, cfg, { dumper, verbose, anthropicBaseUrl }) {
     });
   };
 
-  source.on('end', finish);
-  source.on('error', (error) => {
-    // Client hung up mid-stream, or upstream cut the connection. Not fatal.
-    logError(`stream interrupted: ${error.message}`);
+  // pipeline, not pipe: a failure at either end must tear down the other, and
+  // an http.ServerResponse with no error listener can otherwise throw.
+  pipeline(source, res, (error) => {
+    if (error && !clientGone) {
+      logError(
+        timedOut ? `stream idle for ${IDLE_TIMEOUT_MS / 1000}s` : `stream interrupted: ${error.message}`,
+      );
+    }
+    abort();
     finish();
-    res.end();
   });
-
-  source.pipe(res);
 }
 
 function readBody(req) {
   return new Promise((resolvePromise, reject) => {
     const chunks = [];
-    req.on('data', (chunk) => chunks.push(chunk));
-    req.on('end', () => resolvePromise(Buffer.concat(chunks)));
-    req.on('error', reject);
+    let size = 0;
+    let settled = false;
+    const settle = (fn, value) => {
+      if (settled) return;
+      settled = true;
+      fn(value);
+    };
+
+    req.on('data', (chunk) => {
+      size += chunk.length;
+      if (size > MAX_BODY_BYTES) {
+        settle(reject, new Error(`Request body exceeds ${MAX_BODY_BYTES} bytes`));
+        req.destroy();
+        return;
+      }
+      chunks.push(chunk);
+    });
+    req.on('end', () => settle(resolvePromise, Buffer.concat(chunks)));
+    req.on('error', (error) => settle(reject, error));
+    // An aborted request emits neither 'end' nor 'error', so without this the
+    // promise never settles and everything it holds stays reachable.
+    req.on('close', () => settle(reject, new Error('client closed the request')));
   });
 }
 

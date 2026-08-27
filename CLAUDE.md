@@ -58,15 +58,20 @@ way to break this project:
 
 | | Anthropic path (`provider === null`) | Provider path |
 | --- | --- | --- |
-| `authorization` / `x-api-key` | forwarded untouched | replaced with `Bearer <provider.api_key>`, `x-api-key` **deleted** |
+| `authorization` / `x-api-key` / `cookie` | forwarded untouched | **always deleted**, then `authorization` set to `Bearer <provider.api_key>` if there is one |
 | `anthropic-beta: oauth-2025-04-20` | kept | stripped (other beta values kept) |
 | `[1m]` model suffix | kept | stripped |
 
 `oauth-2025-04-20` is the flag that marks the `Authorization: Bearer` as an OAuth token rather
 than an API key, so it must travel with that credential and disappear when the credential is
 replaced. `[1m]` requests the 1M context window and only Anthropic understands it.
-Deleting `x-api-key` on the provider path is what stops the user's Anthropic credential from
-leaking to a third party — `test/server.test.js` asserts this end to end.
+
+**The scrub on the provider path is unconditional, and must stay that way.** It used to happen
+only inside `if (provider.api_key)`, which meant a provider with no key — or one whose
+`${ENV_VAR}` resolved to the empty string, since `interpolate` maps unset to `''` — received the
+user's real Anthropic credential verbatim. Dropping the credential even when there is nothing to
+replace it with is what stops that leak, and it still lets keyless local endpoints work.
+`test/headers.test.js` and `test/server.test.js` assert this end to end.
 
 ### Config: two scopes, merged
 
@@ -118,6 +123,11 @@ does not see it and `server.close()` hangs forever. `test/parity.test.js` shows 
 subcommand that runs the server in the foreground inside the child; it is not in `--help`.
 `src/daemon.js` keeps a registry at `~/.local/state/ccmpg/daemons.json` keyed by `global` or
 the absolute cwd, and prunes entries whose pid is dead on every `list()`.
+
+`__serve` calls `daemon.register()` once it has bound, so a gateway started by a boot entry —
+which has no parent process to do the bookkeeping — is still visible to `status`, `stop` and
+`logs`. `start -d` also re-checks the child is alive before reporting success, and `stop` runs
+`looksLikeOurs()` first so a recycled pid is forgotten rather than killed.
 
 `ccmpg startup` uses launchd on macOS, a systemd user unit on Linux, and the **Startup folder**
 on Windows — not Task Scheduler, whose `ONLOGON` tasks require elevation.

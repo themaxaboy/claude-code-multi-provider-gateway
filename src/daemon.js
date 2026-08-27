@@ -7,7 +7,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { spawn } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
 export const STATE_DIR = path.join(os.homedir(), '.local', 'state', 'ccmpg');
@@ -24,7 +24,7 @@ export function scopeLabel(key) {
   return key === 'global' ? 'global' : 'project';
 }
 
-function logFileFor(key) {
+export function logFileFor(key) {
   const name =
     key === 'global'
       ? 'global'
@@ -45,10 +45,14 @@ function readRegistry() {
 }
 
 function writeRegistry(data) {
-  ensureStateDir();
-  const tmp = `${REGISTRY}.${process.pid}.tmp`;
-  fs.writeFileSync(tmp, JSON.stringify(data, null, 2));
-  fs.renameSync(tmp, REGISTRY);
+  try {
+    ensureStateDir();
+    const tmp = `${REGISTRY}.${process.pid}.tmp`;
+    fs.writeFileSync(tmp, JSON.stringify(data, null, 2));
+    fs.renameSync(tmp, REGISTRY);
+  } catch {
+    // Bookkeeping is not worth failing a command over.
+  }
 }
 
 export function isAlive(pid) {
@@ -59,6 +63,37 @@ export function isAlive(pid) {
   } catch (error) {
     // EPERM means the process exists but belongs to someone else.
     return error.code === 'EPERM';
+  }
+}
+
+/**
+ * Is the process holding `pid` plausibly one of ours?
+ *
+ * `isAlive` only proves that *something* owns the pid, and pids get recycled —
+ * after a reboot the recorded pid can belong to an unrelated program, which
+ * `stop` would then terminate. This deliberately fails open: only a positive
+ * identification of something that is not node blocks the kill.
+ *
+ * @returns {boolean|null} null when the platform gave us nothing to go on
+ */
+export function looksLikeOurs(pid) {
+  try {
+    if (process.platform === 'win32') {
+      const out = execFileSync('tasklist', ['/FI', `PID eq ${pid}`, '/FO', 'CSV', '/NH'], {
+        stdio: ['ignore', 'pipe', 'ignore'],
+        encoding: 'utf8',
+      });
+      if (!out.trim() || out.includes('No tasks')) return null;
+      return /^"node\.exe"/i.test(out.trim());
+    }
+    const out = execFileSync('ps', ['-p', String(pid), '-o', 'comm='], {
+      stdio: ['ignore', 'pipe', 'ignore'],
+      encoding: 'utf8',
+    });
+    if (!out.trim()) return null;
+    return /node/i.test(out);
+  } catch {
+    return null; // no ps/tasklist, or the process vanished — do not block on it
   }
 }
 
@@ -85,6 +120,43 @@ export function get(key) {
 }
 
 /**
+ * Record the gateway running in *this* process.
+ *
+ * `start()` below covers `ccmpg start -d`, but a boot entry — launchd, a
+ * systemd user unit, the Windows Startup folder — launches `__serve` directly
+ * with no parent to do the bookkeeping. Without this, `status`, `stop` and
+ * `logs` all went blind after a reboot.
+ */
+export function register({ key, cwd, config, host, port }) {
+  const registry = readRegistry();
+  const previous = registry[key];
+  const mine = previous?.pid === process.pid;
+
+  registry[key] = {
+    pid: process.pid,
+    host,
+    port,
+    cwd,
+    config,
+    logFile: previous?.logFile ?? logFileFor(key),
+    scope: scopeLabel(key),
+    startedAt: mine ? previous.startedAt : Date.now(),
+  };
+
+  writeRegistry(registry);
+  return registry[key];
+}
+
+/** Drop an entry without touching the process it names. */
+export function forget(key) {
+  const registry = readRegistry();
+  if (!(key in registry)) return false;
+  delete registry[key];
+  writeRegistry(registry);
+  return true;
+}
+
+/**
  * Start a detached gateway and record it.
  * @returns {{pid: number, logFile: string}}
  */
@@ -92,7 +164,7 @@ export function start({ key, cwd, args, config, host, port }) {
   ensureStateDir();
 
   const logFile = logFileFor(key);
-  const fd = fs.openSync(logFile, 'a');
+  const fd = fs.openSync(logFile, 'a', 0o600);
 
   const child = spawn(process.execPath, [BIN, '__serve', ...args], {
     cwd,
@@ -100,8 +172,19 @@ export function start({ key, cwd, args, config, host, port }) {
     stdio: ['ignore', fd, fd],
     windowsHide: true,
   });
+
+  // spawn reports failure asynchronously, so this only catches it later — but
+  // an unhandled 'error' on a ChildProcess would otherwise throw.
+  child.on('error', () => {});
+
   child.unref();
   fs.closeSync(fd);
+
+  if (!child.pid) {
+    const error = new Error('Could not spawn the gateway process');
+    error.logFile = logFile;
+    throw error;
+  }
 
   const registry = readRegistry();
   registry[key] = {
@@ -119,17 +202,29 @@ export function start({ key, cwd, args, config, host, port }) {
   return { pid: child.pid, logFile };
 }
 
-/** @returns {boolean} whether something was actually running */
+/**
+ * @returns {'stopped'|'not-running'|'stale'} `stale` means the recorded pid is
+ *          now held by something that is not ours, so nothing was killed.
+ */
 export function stop(key) {
   const registry = readRegistry();
   const entry = registry[key];
 
-  if (!entry) return false;
+  if (!entry) return 'not-running';
 
-  const wasAlive = isAlive(entry.pid);
-  if (wasAlive) {
+  let result = 'not-running';
+
+  if (isAlive(entry.pid)) {
+    if (looksLikeOurs(entry.pid) === false) {
+      // The pid was recycled. Forget the entry rather than terminating whatever
+      // now happens to hold it.
+      delete registry[key];
+      writeRegistry(registry);
+      return 'stale';
+    }
     try {
       process.kill(entry.pid, 'SIGTERM');
+      result = 'stopped';
     } catch {
       /* already gone */
     }
@@ -137,11 +232,29 @@ export function stop(key) {
 
   delete registry[key];
   writeRegistry(registry);
-  return wasAlive;
+  return result;
 }
 
 export function logPath(key) {
   return readRegistry()[key]?.logFile ?? logFileFor(key);
+}
+
+/** The last `bytes` bytes of a file, for reporting a failed start. */
+export function tailFile(file, bytes = 4096) {
+  try {
+    const { size } = fs.statSync(file);
+    const start = Math.max(0, size - bytes);
+    const fd = fs.openSync(file, 'r');
+    try {
+      const buffer = Buffer.alloc(size - start);
+      fs.readSync(fd, buffer, 0, buffer.length, start);
+      return buffer.toString('utf8');
+    } finally {
+      fs.closeSync(fd);
+    }
+  } catch {
+    return '';
+  }
 }
 
 /** "2h 14m" / "45s" */

@@ -19,6 +19,43 @@ export const yellow = (t) => paint(YELLOW, t);
 export const red = (t) => paint(RED, t);
 export const green = (t) => paint(GREEN, t);
 
+// ---------------------------------------------------------------- redaction
+
+/** sk-or-v1-c1f9…5320 — enough to recognise, not enough to use. */
+export function maskKey(value) {
+  if (!value) return '';
+  const text = String(value);
+  if (text.startsWith('${')) return text; // an env reference is not a secret
+  // A short key gives too much away from a prefix, and its length is itself a
+  // hint, so it gets a fixed-width mask rather than a proportional one.
+  if (text.length <= 12) return '*'.repeat(8);
+  return `${text.slice(0, 8)}\u2026${text.slice(-4)}`;
+}
+
+const SECRET_HEADERS = new Set(['authorization', 'x-api-key', 'proxy-authorization', 'cookie']);
+
+/**
+ * The same headers with every credential masked. Both --verbose and --dump go
+ * through this: their output lands in the daemon log, which `ccmpg logs` prints
+ * to stdout, so a raw key here ends up in bug reports.
+ */
+export function redactHeaders(headers) {
+  const out = {};
+  for (const [key, value] of Object.entries(headers ?? {})) {
+    if (!SECRET_HEADERS.has(key.toLowerCase())) {
+      out[key] = value;
+      continue;
+    }
+    // Keep the scheme readable so "Bearer <wrong thing>" stays diagnosable.
+    const text = String(value);
+    const space = text.indexOf(' ');
+    out[key] = space > 0 ? `${text.slice(0, space)} ${maskKey(text.slice(space + 1))}` : maskKey(text);
+  }
+  return out;
+}
+
+// ---------------------------------------------------------------- log lines
+
 function clock() {
   return new Date().toTimeString().slice(0, 8);
 }
@@ -44,14 +81,15 @@ export function logError(message) {
 
 /**
  * Append full request/response transcripts to a file.
- * The file holds raw headers and bodies — treat it as sensitive.
+ * Credentials are masked, but the file still holds every request and response
+ * body — treat it as sensitive. Created 0600 for that reason.
  */
 export function createDumper(file) {
   if (!file) return null;
 
   const write = (text) => {
     try {
-      fs.appendFileSync(file, text);
+      fs.appendFileSync(file, text, { mode: 0o600 });
     } catch {
       /* never let logging break the proxy */
     }
@@ -64,7 +102,7 @@ export function createDumper(file) {
         `\n${'='.repeat(60)}\n`,
         `[${new Date().toISOString()}] ${method} ${url} -> ${target} (${status})\n`,
       ];
-      for (const [k, v] of Object.entries(headers)) lines.push(`  ${k}: ${v}\n`);
+      for (const [k, v] of Object.entries(redactHeaders(headers))) lines.push(`  ${k}: ${v}\n`);
       if (body?.length) {
         lines.push('\n');
         lines.push(prettyJson(body));

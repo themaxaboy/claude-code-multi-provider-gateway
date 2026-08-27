@@ -46,7 +46,7 @@ export async function init(flags = {}) {
     console.log(`${yellow('kept')}    ${file} ${dim('(already exists — pass --force to replace it)')}`);
   } else {
     fs.mkdirSync(path.dirname(file), { recursive: true });
-    fs.writeFileSync(file, template(port));
+    fs.writeFileSync(file, template(port), { mode: 0o600 });
     console.log(`${green('created')} ${file}`);
     wroteConfig = true;
   }
@@ -93,6 +93,7 @@ export async function init(flags = {}) {
   if (!global && !flags['no-gitignore']) {
     const entries = [
       [CONFIG_NAME, 'ccmpg config - may hold a real API key'],
+      ['dump.log', 'ccmpg --dump transcript - holds every request and response body'],
     ];
     if (wroteSettings) entries.push([SETTINGS_ENTRY, null]);
 

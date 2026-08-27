@@ -7,6 +7,14 @@
  * Partial lines are carried across chunks, so a `data: {...}` event split
  * across a chunk boundary is still counted.
  */
+/**
+ * No SSE line comes anywhere near this. Past it we are not looking at SSE at
+ * all — a single-line JSON body, say — and `leftover` would otherwise grow into
+ * a full copy of the response, which is exactly what this module promises not
+ * to do.
+ */
+const MAX_LEFTOVER = 64 * 1024;
+
 export function createUsageTap() {
   const stats = { usage: {}, meta: {} };
   const decoder = new TextDecoder('utf-8');
@@ -40,11 +48,13 @@ export function createUsageTap() {
 }
 
 function consumeLine(line, stats) {
-  if (!line.startsWith('data: ')) return;
+  if (!line.startsWith('data:')) return;
 
   let event;
   try {
-    event = JSON.parse(line.slice(6));
+    // The space after "data:" is optional in the SSE spec, and some providers
+    // leave it out.
+    event = JSON.parse(line.slice(5));
   } catch {
     return; // e.g. "data: [DONE]"
   }
