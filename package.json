@@ -1,6 +1,6 @@
 {
   "name": "ccmpg",
-  "version": "1.1.0",
+  "version": "1.0.1",
   "description": "Claude Code Multi-Provider Gateway — Anthropic-compatible proxy that routes by model name",
   "keywords": [
     "claude-code",
