@@ -1,6 +1,8 @@
 // The proxy itself: one catch-all route that forwards to the resolved upstream.
 
 import http from 'node:http';
+import net from 'node:net';
+import tls from 'node:tls';
 import { Readable } from 'node:stream';
 import { ANTHROPIC_BASE_URL } from './config.js';
 import { buildRequestHeaders, buildResponseHeaders } from './headers.js';
@@ -18,12 +20,92 @@ const REQUEST_TIMEOUT_MS = 300_000;
 export function createServer(cfg, { dump, verbose = false, anthropicBaseUrl = ANTHROPIC_BASE_URL } = {}) {
   const dumper = createDumper(dump);
 
-  return http.createServer((req, res) => {
+  const server = http.createServer((req, res) => {
     handle(req, res, cfg, { dumper, verbose, anthropicBaseUrl }).catch((error) => {
       logError(error?.message ?? String(error));
       sendError(res, 502, 'proxy_error', error?.message ?? 'Unknown proxy error');
     });
   });
+
+  // fetch() cannot carry a protocol upgrade, so WebSockets get their own path:
+  // a raw byte tunnel. Without this the handshake is silently downgraded to a
+  // plain request and the client sees 200 where it expected 101.
+  server.on('upgrade', (req, socket, head) => {
+    tunnel(req, socket, head, { anthropicBaseUrl, verbose });
+  });
+
+  return server;
+}
+
+/**
+ * Splice the client socket to the upstream one and stay out of the way.
+ *
+ * Upgrade requests carry no JSON body, so there is no model to route on: they
+ * always go to the Anthropic fallback.
+ */
+function tunnel(req, clientSocket, head, { anthropicBaseUrl, verbose }) {
+  let target;
+  try {
+    target = new URL(anthropicBaseUrl + req.url);
+  } catch {
+    return abortTunnel(clientSocket, 400, 'Bad upgrade target');
+  }
+
+  const secure = target.protocol === 'https:';
+  const port = Number(target.port) || (secure ? 443 : 80);
+
+  logRequest({ providerName: null, model: 'upgrade', path: pathOf(req.url) });
+
+  const onReady = () => {
+    // Rebuild the request line by hand: Upgrade and Connection must survive,
+    // which is exactly what the normal header filter strips.
+    const lines = [`${req.method} ${target.pathname}${target.search} HTTP/1.1`];
+    const raw = req.rawHeaders;
+    for (let i = 0; i < raw.length; i += 2) {
+      const key = raw[i];
+      const value = key.toLowerCase() === 'host' ? target.host : raw[i + 1];
+      lines.push(`${key}: ${value}`);
+    }
+
+    upstream.write(`${lines.join('\r\n')}\r\n\r\n`);
+    if (head?.length) upstream.write(head);
+
+    clientSocket.setNoDelay(true);
+    upstream.setNoDelay(true);
+    upstream.pipe(clientSocket);
+    clientSocket.pipe(upstream);
+
+    if (verbose) console.error(`    -> ${target.href} (tunnel)`);
+  };
+
+  const upstream = secure
+    ? tls.connect(
+        // Force HTTP/1.1: an h2 negotiation would make the raw bytes above meaningless.
+        { host: target.hostname, port, servername: target.hostname, ALPNProtocols: ['http/1.1'] },
+        onReady,
+      )
+    : net.connect({ host: target.hostname, port }, onReady);
+
+  upstream.on('error', (error) => {
+    logError(`tunnel failed: ${error.message}`);
+    abortTunnel(clientSocket, 502, `Cannot reach ${target.origin}`);
+  });
+
+  const close = () => {
+    upstream.destroy();
+    clientSocket.destroy();
+  };
+  clientSocket.on('error', close);
+  clientSocket.on('close', () => upstream.destroy());
+  upstream.on('close', () => clientSocket.destroy());
+}
+
+function abortTunnel(socket, status, message) {
+  if (!socket.destroyed && socket.writable) {
+    const reason = status === 502 ? 'Bad Gateway' : 'Bad Request';
+    socket.write(`HTTP/1.1 ${status} ${reason}\r\nConnection: close\r\n\r\n${message}`);
+  }
+  socket.destroy();
 }
 
 async function handle(req, res, cfg, { dumper, verbose, anthropicBaseUrl }) {

@@ -238,6 +238,34 @@ ccmpg model rm glm -y
 - ไม่มี retry หรือ failover เมื่อ provider ล่ม
 - ไม่แปลง body ระหว่างรูปแบบ (tool schema, image block ต้องเข้ากันได้อยู่แล้ว)
 
+สิ่งที่ **รองรับแล้ว** และเทสต์คุมไว้: ทุก endpoint ทุกเมธอด query string body ขนาดใหญ่
+สถานะ error พร้อม header `retry-after` / `anthropic-ratelimit-*` และ **WebSocket** (`Upgrade`)
+ซึ่งถูก tunnel เป็น raw socket ไม่ผ่าน `fetch`
+
+### `/remote-control` ใช้ไม่ได้ระหว่างเปิด Gateway
+
+`/remote-control` จะขึ้น **Remote Control initialization failed** เมื่อ `ANTHROPIC_BASE_URL`
+ไม่ได้ชี้ไปที่ `api.anthropic.com`
+
+นี่เป็นข้อกำหนดของ Claude Code เอง **ไม่ใช่บั๊กของ ccmpg และพร็อกซีแก้ไม่ได้** — Claude Code
+อ่านค่า env นี้แล้วปฏิเสธตั้งแต่ต้น ก่อนจะยิง request ออกมาถึง Gateway ด้วยซ้ำ ข้อความในตัวโปรแกรมระบุว่า:
+
+> `ANTHROPIC_BASE_URL` is set and does not point at `api.anthropic.com`, so this session is
+> using a custom endpoint
+
+แม้แต่ `_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL` ก็ข้ามไม่ได้ เพราะ Claude Code ยกเว้น
+Remote Control ไว้เป็นกรณีพิเศษ ข้อจำกัดนี้เกิดกับพร็อกซีทุกตัวเหมือนกันหมด ไม่ใช่เฉพาะ ccmpg
+และฟีเจอร์อื่นที่ต้องต่อตรงกับ Anthropic ก็อาจโดนตรวจแบบเดียวกัน (เช่น `/feedback`)
+
+**วิธีเลี่ยง** — ใช้ Remote Control ใน session ที่ไม่มี `ANTHROPIC_BASE_URL`:
+
+```bash
+# เอาบรรทัด ANTHROPIC_BASE_URL ออกจาก .claude/settings.local.json ชั่วคราว แล้วเปิด claude ใหม่
+# หรือรัน claude จากโฟลเดอร์อื่นที่ไม่มีไฟล์ตั้งค่านั้น
+```
+
+ถ้าตั้งไว้ระดับ global (`ccmpg init -g`) จะกระทบทุกโปรเจกต์ — ใช้ระดับโปรเจกต์แทนจะคุมได้ง่ายกว่า
+
 สิ่งที่ ccmpg จัดการให้เงียบ ๆ: ตัด header hop-by-hop, บังคับ `accept-encoding: identity` เพื่อให้อ่าน SSE ได้,
 ตัด suffix `[1m]` และ `anthropic-beta: oauth-2025-04-20` ก่อนส่งไปหา provider อื่น
 
