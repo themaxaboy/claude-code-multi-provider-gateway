@@ -5,6 +5,7 @@ import fs from 'node:fs';
 import { parseArgs } from 'node:util';
 import { ConfigError } from '../src/config.js';
 import { NotATTYError } from '../src/prompt.js';
+import { printUpdateNotice, scheduleUpdateCheck } from '../src/update.js';
 import { red, dim } from '../src/log.js';
 
 const pkg = JSON.parse(
@@ -44,6 +45,7 @@ Options
   -y, --yes               answer confirmation prompts with yes
       --force             overwrite an existing file
       --no-settings       init: skip writing Claude Code's settings file
+      --no-gitignore      init: skip updating .gitignore
       --cascade           remove dependent model aliases too
       --version           print the version
   -h, --help              show this help
@@ -62,6 +64,7 @@ const OPTIONS = {
   force: { type: 'boolean', default: false },
   cascade: { type: 'boolean', default: false },
   'no-settings': { type: 'boolean', default: false },
+  'no-gitignore': { type: 'boolean', default: false },
   version: { type: 'boolean', default: false },
   help: { type: 'boolean', short: 'h', default: false },
   // provider/model flags, so partial input can skip the matching question
@@ -150,6 +153,12 @@ async function main(argv) {
 
 try {
   process.exitCode = (await main(process.argv.slice(2))) ?? 0;
+
+  // Long-running commands print their own notice inside the banner.
+  if (!['start', '__serve'].includes(process.argv[2] ?? 'start')) {
+    printUpdateNotice(pkg.version);
+    scheduleUpdateCheck(pkg.version);
+  }
 } catch (error) {
   if (error instanceof NotATTYError) {
     console.error(red(error.message));

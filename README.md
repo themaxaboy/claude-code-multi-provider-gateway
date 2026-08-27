@@ -62,7 +62,13 @@ ccmpg init
 ```
 
 ตอบ `Y` จะได้ `./.claude/settings.local.json` ที่มี `ANTHROPIC_BASE_URL` ให้ (ข้ามคำถามด้วย `-y`
-หรือปฏิเสธไปเลยด้วย `--no-settings`) จากนั้นเปิด `.ccmpg.yaml` มาแก้:
+หรือปฏิเสธไปเลยด้วย `--no-settings`)
+
+จากนั้น `.gitignore` จะถูกสร้างหรือต่อท้ายให้อัตโนมัติ เพิ่ม `.ccmpg.yaml` และ
+`.claude/settings.local.json` เข้าไป — สองไฟล์นี้เป็นของเครื่องคุณคนเดียวและอาจมีคีย์จริงอยู่
+(ไม่ต้องการก็ใช้ `--no-gitignore`) กฎเดิมในไฟล์ไม่ถูกแตะ และรันซ้ำก็ไม่เพิ่มบรรทัดซ้ำ
+
+จากนั้นเปิด `.ccmpg.yaml` มาแก้:
 
 ```yaml
 version: 1
@@ -208,6 +214,18 @@ ccmpg model rm glm -y
 คำสั่งกลุ่มนี้แก้ YAML โดยรักษาคอมเมนต์เดิม และตรวจก่อนเขียนเสมอ — `model add` ปฏิเสธถ้า provider ไม่มีอยู่
 `provider rm` ปฏิเสธถ้ายังมี alias อ้างถึง เมื่อไม่ได้รันบน terminal จริงจะไม่ถาม แต่ฟ้องว่าขาด flag ตัวไหน
 
+### แจ้งเตือนเวอร์ชันใหม่
+
+เมื่อมีเวอร์ชันใหม่บน npm ccmpg จะขึ้นข้อความแบบเดียวกับ npm:
+
+```
+Update available 1.1.0 -> 1.1.2
+Run npm i -g ccmpg to update
+```
+
+ข้อความอ่านจากแคชที่รีเฟรชเบื้องหลังวันละครั้ง — ไม่มีคำสั่งไหนต้องรอเน็ต และออกทาง stderr
+จึงไม่ปนกับ output เวลา pipe ปิดด้วย `CCMPG_NO_UPDATE_CHECK=1`
+
 ---
 
 ## Log
@@ -288,6 +306,8 @@ ccmpg/
 │   │   └── shared.js       # ตารางและการมาสก์คีย์
 │   ├── config.js           # โหลดและรวม global + project, แทนค่า ${ENV}, validate
 │   ├── claude-settings.js  # merge ANTHROPIC_BASE_URL ลง settings ของ Claude Code
+│   ├── gitignore.js        # ต่อท้าย .gitignore แบบไม่ซ้ำและไม่แตะกฎเดิม
+│   ├── update.js           # แจ้งเตือนเวอร์ชันใหม่จากแคช รีเฟรชเบื้องหลัง
 │   ├── router.js           # เลือก provider และเขียนทับ body.model — ฟังก์ชันบริสุทธิ์
 │   ├── headers.js          # กรอง hop-by-hop, ใส่ auth, ตัด oauth beta — ฟังก์ชันบริสุทธิ์
 │   ├── usage.js            # แกะ SSE เก็บ token usage แบบ streaming

@@ -30,6 +30,18 @@ There is no linter or build step. The package is ESM (`"type": "module"`), Node 
 The script is `install:global`, never `install` — `install` is an npm **lifecycle hook** and
 would fire on every plain `npm install`.
 
+## Releasing
+
+**Any change to shipped code means bumping `version` in `package.json` in the same commit.**
+Users are told about new versions by comparing their installed `version` against the npm
+registry, so a fix that ships under an unchanged version is invisible to everyone already
+running ccmpg. Patch for fixes, minor for new commands or config keys, major for anything
+that invalidates an existing `.ccmpg.yaml`.
+
+`src/update.js` prints the notice from a cache and refreshes it in the background at most
+once a day, on an unref'd socket so no command ever waits on the network. It is silenced by
+`CCMPG_NO_UPDATE_CHECK=1`, and prints to stderr so piping stdout stays clean.
+
 ## Architecture
 
 ### The one routing rule
@@ -117,6 +129,13 @@ does not point at `api.anthropic.com`. Claude Code checks the env var itself and
 sending anything, so no amount of proxying or header work here can change it — and
 `_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL` is explicitly exempted from applying to it. This is
 documented as a limitation in the README; it is not a ccmpg bug.
+
+### Files init touches that are not ours
+
+`ccmpg init` writes three things at project scope, and only the first is ccmpg's own:
+`.ccmpg.yaml`, Claude Code's `.claude/settings.local.json` (via `src/claude-settings.js`), and
+`.gitignore` (via `src/gitignore.js`). The latter two are merged or appended, never rewritten,
+and both steps can be declined — interactively, or with `--no-settings` / `--no-gitignore`.
 
 ### Claude Code settings
 

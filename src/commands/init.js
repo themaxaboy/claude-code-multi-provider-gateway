@@ -3,8 +3,12 @@ import os from 'node:os';
 import path from 'node:path';
 import { CONFIG_NAME, DEFAULT_SERVER, configPath } from '../config.js';
 import { applyBaseUrl, baseUrlFor, settingsPath } from '../claude-settings.js';
+import { ensureIgnored } from '../gitignore.js';
 import { confirm } from '../prompt.js';
 import { cyan, dim, green, red, yellow } from '../log.js';
+
+/** Claude Code's per-user settings file; personal, never shared. */
+const SETTINGS_ENTRY = '.claude/settings.local.json';
 
 const template = (port) => `version: 1
 
@@ -85,7 +89,24 @@ export async function init(flags = {}) {
     }
   }
 
-  // 3. what to do next
+  // 3. keep the local files out of git
+  if (!global && !flags['no-gitignore']) {
+    const entries = [
+      [CONFIG_NAME, 'ccmpg config - may hold a real API key'],
+    ];
+    if (wroteSettings) entries.push([SETTINGS_ENTRY, null]);
+
+    for (const [entry, comment] of entries) {
+      const result = ensureIgnored(entry, { comment: comment ?? undefined });
+      if (result.action === 'created') {
+        console.log(`${green('created')} ${result.file} ${dim(`(ignoring ${entry})`)}`);
+      } else if (result.action === 'updated') {
+        console.log(`${green('updated')} ${result.file} ${dim(`(+ ${entry})`)}`);
+      }
+    }
+  }
+
+  // 4. what to do next
   console.log('');
   let step = 1;
   if (wroteConfig) {
@@ -103,10 +124,6 @@ export async function init(flags = {}) {
 
   console.log('');
   console.log(dim('  Anthropic models need no entry — anything not in models: goes straight through.'));
-
-  if (!global) {
-    console.log(dim(`  Add ${CONFIG_NAME} to .gitignore if you keep a real key in it.`));
-  }
 
   return 0;
 }

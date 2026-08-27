@@ -2,6 +2,7 @@ import { ANTHROPIC_BASE_URL, configPath, loadConfig } from '../config.js';
 import { createServer } from '../server.js';
 import * as daemon from '../daemon.js';
 import { cyan, dim, green } from '../log.js';
+import { printUpdateNotice, scheduleUpdateCheck } from '../update.js';
 
 /** Shared by the foreground and detached paths. */
 function resolveConfig(flags) {
@@ -34,11 +35,17 @@ export async function serve(flags, { version }) {
   });
 
   banner({ cfg, host, port, version });
+
   if (!flags.detach) {
     console.log(`  ${dim('Ctrl+C to stop')}  ${dim('·')}  ${dim('ccmpg start -d to run in the background')}`);
     console.log('');
   }
   if (flags.dump) console.log(dim(`  dumping every request to ${flags.dump}`));
+
+  printUpdateNotice(version);
+  // The server is about to run for a long time, so a background refresh here
+  // costs nothing and keeps the cache warm for short commands.
+  scheduleUpdateCheck(version);
 
   const shutdown = () => {
     server.close(() => process.exit(0));
@@ -87,5 +94,6 @@ export async function start(flags, ctx) {
   console.log(`  ${dim('logs     ')} ${logFile}`);
   console.log('');
   console.log(dim(`  ccmpg status  ·  ccmpg logs -f  ·  ccmpg stop`));
+  printUpdateNotice(ctx.version);
   return 0;
 }
