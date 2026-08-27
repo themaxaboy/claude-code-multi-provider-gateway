@@ -1,0 +1,8 @@
+node_modules/
+
+# คอนฟิกอาจมี API key จริง — อย่า commit
+.ccmpg.yaml
+
+# ผลจาก --dump มีทั้ง header และ body ของทุก request
+dump.log
+*.log

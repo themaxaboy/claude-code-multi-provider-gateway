@@ -1,0 +1,39 @@
+{
+  "name": "ccmpg",
+  "version": "1.0.0",
+  "description": "Claude Code Multi-Provider Gateway \u2014 Anthropic-compatible proxy that routes by model name",
+  "type": "module",
+  "bin": {
+    "ccmpg": "bin/ccmpg.js"
+  },
+  "files": [
+    "bin",
+    "src",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "dev": "node --watch bin/ccmpg.js start --verbose",
+    "start": "node bin/ccmpg.js start",
+    "test": "node --test",
+    "test:watch": "node --test --watch",
+    "install:global": "npm install --global .",
+    "uninstall:global": "npm uninstall --global ccmpg",
+    "link": "npm link",
+    "unlink": "npm unlink --global ccmpg"
+  },
+  "keywords": [
+    "claude-code",
+    "anthropic",
+    "proxy",
+    "gateway",
+    "llm"
+  ],
+  "license": "MIT",
+  "dependencies": {
+    "@inquirer/prompts": "^7.2.1",
+    "yaml": "^2.6.1"
+  }
+}
